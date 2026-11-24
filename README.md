@@ -1,6 +1,6 @@
 # Zwift Controller
 
-Experimental v0.4.1 Windows bridge. Left Click supplies all ten buttons; right Click connects temporarily for battery reads without a handshake. Hardware validation required. MyWhoosh output is not implemented yet.
+Experimental v0.5 Windows bridge. Left Click supplies all ten buttons; right Click connects temporarily for battery reads without a handshake. Hardware validation required. OpenBikeControl v1 TCP/mDNS output is implemented experimentally.
 
 ```powershell
 py -3.12 -m pip install -r requirements.txt
@@ -9,3 +9,7 @@ py -3.12 zwift_controller.py
 ```
 
 The local config.json is generated using the development pair addresses. For another pair, run `py -3.12 zwift_controller.py --discover` and edit config.json with the correct left/right addresses. Battery interval defaults to 900 seconds. Failed right battery reads retry after 60 seconds. Use `--no-right-battery` to test the left connection alone. Ctrl+C stops the program. QuickEdit is disabled temporarily when supported by the Windows console.
+
+## MyWhoosh
+
+Start the bridge, wake the controllers, then open the MyWhoosh pairing screen and select the OpenBikeControl icon. Choose the advertised Zwift Controller device. Allow Python on trusted private networks in Windows Firewall if prompted. The server uses TCP port 8765. Use `--obc-host 192.168.1.10` (replace with your actual local IPv4) if the automatic interface selection is wrong. Use `--no-obc` for Bluetooth-only diagnostics. App-specific button support and TCP interoperability still need hardware testing. Haptic commands are accepted but not acted on.
