@@ -245,8 +245,105 @@ async def left_session(device, config, battery_enabled, bridge=None, recovery=No
         await disconnect(client)
         log("GAUCHE | Deconnectee")
 
+async def dual_sessions(config, bridge, read_right=True):
+    scan_lock = asyncio.Lock()
+    ready = set()
+
+    async def worker(side, address, mask):
+        while True:
+            client = None
+            state = 0
+            counts = {"rx": 0, "decoded": 0, "sync": 0}
+            def emit(current):
+                nonlocal state
+                current &= mask
+                for button, pressed, bit in changes(state, current):
+                    log(f"{side} | {button} | {'ENFONCE' if pressed else 'RELACHE'} | 0x{bit:04X}")
+                    if bridge is not None:
+                        bridge.button(button, pressed)
+                state = current
+            def notify(sender, data):
+                counts["rx"] += 1
+                debug(f"{side} | RX ASYNC #{counts['rx']} | {bytes(data).hex(' ')}")
+                if bytes(data[:2]) == b"\xff\x03":
+                    log(f"{side} | Challenge authentification Zwift recu (FF 03)")
+                current = decode_buttons(data)
+                if current is not None:
+                    counts["decoded"] += 1
+                    emit(current)
+            def sync_notify(sender, data):
+                counts["sync"] += 1
+                debug(f"{side} | RX SYNC #{counts['sync']} | {bytes(data).hex(' ')}")
+            try:
+                async with scan_lock:
+                    device = await find_device(address)
+                    if device is not None:
+                        client = BleakClient(device, timeout=15)
+                        log(f"{side} | Connexion...")
+                        await bounded(client.connect(), 20)
+                if client is None:
+                    log(f"{side} | En attente de la manette")
+                else:
+                    await bounded(client.start_notify(ZWIFT_ASYNC, notify))
+                    await bounded(client.start_notify(ZWIFT_SYNC_TX, sync_notify))
+                    char = client.services.get_characteristic(ZWIFT_SYNC_RX)
+                    if char is None:
+                        raise RuntimeError("Sync RX introuvable")
+                    response = "write" in char.properties
+                    for payload in HANDSHAKE:
+                        debug(f"{side} | TX HANDSHAKE | {payload.hex(' ')}")
+                        await bounded(client.write_gatt_char(char, payload, response=response))
+                        await asyncio.sleep(0.3)
+                    ready.add(side)
+                    if bridge is not None:
+                        bridge.set_ready(True)
+                    log(f"{side} | Initialisation terminee - 5 boutons")
+                    if side == "GAUCHE" or read_right:
+                        await read_battery(client, side, bridge if side == "GAUCHE" else None)
+                    next_battery = time.monotonic() + config["battery_interval"]
+                    started = time.monotonic()
+                    next_status = started
+                    while client.is_connected:
+                        await asyncio.sleep(3)
+                        if not client.is_connected:
+                            break
+                        await bounded(client.write_gatt_char(char, b"RideOn", response=response))
+                        debug(f"{side} | KEEPALIVE | OK")
+                        now = time.monotonic()
+                        if now >= next_status:
+                            debug(f"{side} | STATUS | connected=True | session={now-started:.1f}s | {counts}")
+                            next_status = now + 10
+                        if now >= next_battery:
+                            if side == "GAUCHE" or read_right:
+                                await read_battery(client, side)
+                            next_battery = now + config["battery_interval"]
+            except Exception as exc:
+                log(f"{side} | {type(exc).__name__}: {exc!r}")
+            finally:
+                emit(0)
+                ready.discard(side)
+                if bridge is not None:
+                    bridge.set_ready(bool(ready))
+                if client is not None:
+                    await disconnect(client)
+                    log(f"{side} | Deconnectee | {counts}")
+            await asyncio.sleep(5)
+
+    tasks = [
+        asyncio.create_task(worker("GAUCHE", config["left"], LEFT_MASK)),
+        asyncio.create_task(worker("DROITE", config["right"], RIGHT_MASK)),
+    ]
+    try:
+        await asyncio.gather(*tasks)
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 async def main(argv=None, reset_event=None):
     parser = argparse.ArgumentParser()
+    parser.add_argument("--dual", action="store_true", help="Experimental independent left and right connections; no automatic reboot")
     parser.add_argument("--no-auto-reset", action="store_true", help="Disable experimental idle recovery")
     parser.add_argument("--debug", action="store_true", help="Log raw Bluetooth traffic to debug.log")
     parser.add_argument("--no-right-battery", action="store_true")
@@ -266,8 +363,8 @@ async def main(argv=None, reset_event=None):
     config = load_config()
     if config["left"].upper() == config["right"].upper() or config["battery_interval"] < 60:
         raise ValueError("Configuration invalide")
-    print("MyWhoosh Controller - v0.6.2")
-    print("Connexion principale gauche. CTRL+C pour quitter.")
+    print("MyWhoosh Controller - v0.6.3")
+    print("Mode dual : deux connexions." if args.dual else "Connexion principale gauche. CTRL+C pour quitter.")
     if not CONFIG.exists():
         CONFIG.write_text(json.dumps(config, indent=2), encoding="utf-8")
     global DEBUG_FILE
@@ -285,6 +382,9 @@ async def main(argv=None, reset_event=None):
             from openbikecontrol import Bridge
             bridge = Bridge(log, host=args.obc_host)
             await bridge.start()
+        if args.dual:
+            await dual_sessions(config, bridge, not args.no_right_battery)
+            return
         while True:
             try:
                 device = await find_device(config["left"])
