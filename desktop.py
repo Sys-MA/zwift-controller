@@ -59,22 +59,24 @@ class App:
         self.reset_event = threading.Event()
         self.reset_count = 0
         self.config = core.load_config()
-        root.title("Zwift Controller 0.6.2")
-        root.geometry("650x690")
-        root.minsize(590, 640)
+        root.title("Zwift Controller 0.7.0")
+        root.geometry("700x780")
+        root.minsize(650, 720)
         root.protocol("WM_DELETE_WINDOW", self.hide)
         root.columnconfigure(0, weight=1)
         root.rowconfigure(0, weight=1)
         frame = ttk.Frame(root, padding=20)
         frame.grid(sticky="nsew")
         frame.columnconfigure(0, weight=1)
-        frame.rowconfigure(7, weight=1)
+        frame.rowconfigure(8, weight=1)
         ttk.Label(frame, text="Zwift Controller", font=("Segoe UI", 20, "bold")).grid(sticky="w")
         self.status = tk.StringVar(value="En attente")
         ttk.Label(frame, textvariable=self.status).grid(sticky="w", pady=(0,12))
         batteries = ttk.Frame(frame)
         batteries.grid(sticky="ew")
         self.levels = {}
+        self.connections = {}
+        self.connected = set()
         for i, side in enumerate(("GAUCHE", "DROITE")):
             batteries.columnconfigure(i, weight=1)
             panel = ttk.LabelFrame(batteries, text=side.title(), padding=12)
@@ -82,6 +84,8 @@ class App:
             value = tk.StringVar(value="Batterie : inconnue")
             self.levels[side] = value
             ttk.Label(panel, textvariable=value).pack(anchor="w")
+            self.connections[side] = tk.StringVar(value="En attente")
+            ttk.Label(panel, textvariable=self.connections[side]).pack(anchor="w")
         options = ttk.Frame(frame)
         options.grid(sticky="ew", pady=12)
         self.mode = tk.StringVar(value=self.config.get("output_mode", "Clavier"))
@@ -91,6 +95,14 @@ class App:
         self.auto = tk.BooleanVar(value=autostart_enabled())
         ttk.Checkbutton(options, text="Demarrer avec Windows", variable=self.auto,
                         command=self.toggle_auto).pack(side="right")
+        recovery = ttk.LabelFrame(frame, text="Authentification Zwift", padding=8)
+        recovery.grid(sticky="ew", pady=(0, 8))
+        self.auth = tk.StringVar(value="Aucune demande detectee")
+        ttk.Label(recovery, textvariable=self.auth, wraplength=600).pack(anchor="w")
+        self.auto_reset = tk.BooleanVar(value=self.config.get("auto_reset", False))
+        self.fast_reconnect = tk.BooleanVar(value=self.config.get("fast_reconnect", True))
+        ttk.Checkbutton(recovery, text="Redemarrage de secours (gauche)", variable=self.auto_reset).pack(anchor="w")
+        ttk.Checkbutton(recovery, text="Reconnexion rapide (cache GATT Windows)", variable=self.fast_reconnect).pack(anchor="w")
         mappings = ttk.LabelFrame(frame, text="Touches MyWhoosh (modifiables)", padding=10)
         mappings.grid(sticky="ew")
         mappings.columnconfigure(1, weight=1)
@@ -110,7 +122,7 @@ class App:
         ttk.Button(controls, text="Appliquer / reconnecter", command=self.apply).pack(side="left")
         ttk.Button(controls, text="Arreter", command=self.stop).pack(side="left", padx=8)
         self.reset_label = tk.StringVar(value="Reboots : 0")
-        ttk.Button(controls, text="Redemarrer", command=self.request_reset).pack(side="left")
+        ttk.Button(controls, text="Reset gauche", command=self.request_reset).pack(side="left")
         ttk.Label(controls, textvariable=self.reset_label).pack(side="left", padx=6)
         ttk.Button(controls, text="Quitter", command=self.quit).pack(side="right")
         self.logs = tk.Text(frame, height=8, wrap="word", state="disabled", font=("Consolas", 9))
@@ -156,9 +168,19 @@ class App:
         if self.worker and self.worker.is_alive():
             return
         self.status.set("Recherche Bluetooth...")
+        self.connected.clear()
+        self.reset_event.clear()
+        self.auth.set("Aucune demande detectee")
+        for side in self.connections:
+            self.connections[side].set("En attente")
         mode = self.mode.get()
         args = {"Clavier": ["--keyboard"], "OpenBikeControl": ["--obc"],
                 "Bluetooth seulement": ["--no-obc"]}[mode]
+        args += ["--dual"]
+        if not self.auto_reset.get():
+            args.append("--no-auto-reset")
+        if self.fast_reconnect.get():
+            args.append("--fast-reconnect")
         def run():
             async def entry():
                 self.loop = asyncio.get_running_loop()
@@ -209,7 +231,8 @@ class App:
         try:
             for key in mapping.values():
                 key_code(key)
-            self.config.update(keyboard_mapping=mapping, output_mode=self.mode.get())
+            self.config.update(keyboard_mapping=mapping, output_mode=self.mode.get(),
+                               auto_reset=self.auto_reset.get(), fast_reconnect=self.fast_reconnect.get())
             core.CONFIG.write_text(json.dumps(self.config, indent=2), encoding="utf-8")
         except (ValueError, OSError) as exc:
             messagebox.showerror("Configuration", str(exc))
@@ -246,20 +269,36 @@ class App:
                 self.quit()
             elif event == "stopped":
                 self.status.set("Arrete")
+                self.connected.clear()
+                for side in self.connections:
+                    self.connections[side].set("Arretee")
                 if self.restart and not self.quitting:
                     self.restart = False
                     self.root.after(150, self.start)
             elif event == "log":
-                if value.startswith("RESET | Commande envoyee"):
+                if value.startswith("GAUCHE | RESET |"):
                     self.reset_count += 1
                     self.reset_label.set(f"Reboots : {self.reset_count}")
                 match = re.search(r"(GAUCHE|DROITE) \| Batterie : (\d+)%", value)
                 if match:
                     self.levels[match[1]].set(f"Batterie : {match[2]} % (derniere lecture)")
-                if "GAUCHE | Initialisation terminee" in value:
-                    self.status.set("Connecte - manettes pretes")
-                elif "GAUCHE | Deconnectee" in value:
-                    self.status.set("Deconnecte - reconnexion")
+                if " | AUTH | " in value:
+                    self.auth.set("Renouvellement recommande : fermer ce programme, jumeler dans Zwift, puis relancer.")
+                    if self.tray:
+                        try:
+                            self.tray.notify("Jumeler les manettes dans Zwift avant de reprendre.", "Authentification Zwift")
+                        except Exception:
+                            pass
+                for side in self.connections:
+                    if value.startswith(f"{side} | Initialisation terminee"):
+                        self.connected.add(side)
+                        self.connections[side].set("Connectee")
+                    elif value.startswith(f"{side} | Deconnectee"):
+                        self.connected.discard(side)
+                        self.connections[side].set("Reconnexion...")
+                    elif value.startswith(f"{side} | Connexion..."):
+                        self.connections[side].set("Connexion...")
+                self.status.set(f"{len(self.connected)}/2 manettes connectees")
                 self.logs.configure(state="normal")
                 self.logs.insert("end", value + "\n")
                 if int(self.logs.index("end-1c").split(".")[0]) > 500:
