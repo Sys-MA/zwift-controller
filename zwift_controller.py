@@ -82,11 +82,13 @@ async def disconnect(client):
 async def find_device(address):
     return await bounded(BleakScanner.find_device_by_address(address, timeout=5), 8)
 
-async def read_battery(client, side):
+async def read_battery(client, side, bridge=None):
     try:
         data = await bounded(client.read_gatt_char(BATTERY), 5)
         if len(data) == 1 and data[0] <= 100:
             log(f"{side} | Batterie : {data[0]}%")
+            if bridge is not None:
+                bridge.set_battery(data[0])
             return True
         log(f"{side} | Batterie : valeur invalide")
     except Exception as exc:
@@ -112,7 +114,7 @@ async def right_battery(address):
             await disconnect(client)
             log("DROITE | Fin de connexion temporaire")
 
-async def left_session(device, config, battery_enabled):
+async def left_session(device, config, battery_enabled, bridge=None):
     client = BleakClient(device, timeout=15)
     state = 0
     battery_task = None
@@ -120,6 +122,8 @@ async def left_session(device, config, battery_enabled):
         nonlocal state
         for button, pressed, mask in changes(state, current):
             log(f"GAUCHE | {button} | {'ENFONCE' if pressed else 'RELACHE'} | 0x{mask:04X}")
+            if bridge is not None:
+                bridge.button(button, pressed)
         state = current
     def notify(sender, data):
         current = decode_buttons(data)
@@ -142,7 +146,9 @@ async def left_session(device, config, battery_enabled):
             await bounded(client.write_gatt_char(char, payload, response=response))
             await asyncio.sleep(0.3)
         log("GAUCHE | Initialisation terminee - 10 boutons")
-        await read_battery(client, "GAUCHE")
+        if bridge is not None:
+            bridge.set_ready(True)
+        await read_battery(client, "GAUCHE", bridge)
         if battery_enabled:
             battery_task = asyncio.create_task(batteries())
         next_battery = time.monotonic() + config["battery_interval"]
@@ -159,6 +165,8 @@ async def left_session(device, config, battery_enabled):
             battery_task.cancel()
             await asyncio.gather(battery_task, return_exceptions=True)
         emit(0)
+        if bridge is not None:
+            bridge.set_ready(False)
         await disconnect(client)
         log("GAUCHE | Deconnectee")
 
@@ -167,6 +175,8 @@ async def main():
     parser.add_argument("--no-right-battery", action="store_true")
     parser.add_argument("--discover", action="store_true",
                         help="List nearby Zwift Click addresses")
+    parser.add_argument("--no-obc", action="store_true")
+    parser.add_argument("--obc-host", help="Local IPv4 address for discovery")
     args = parser.parse_args()
     if args.discover:
         for device, adv in (await BleakScanner.discover(timeout=8, return_adv=True)).values():
@@ -176,20 +186,29 @@ async def main():
     config = load_config()
     if config["left"].upper() == config["right"].upper() or config["battery_interval"] < 60:
         raise ValueError("Configuration invalide")
-    print("MyWhoosh Controller - v0.4.1")
+    print("MyWhoosh Controller - v0.5")
     print("Connexion principale gauche. CTRL+C pour quitter.")
     if not CONFIG.exists():
         CONFIG.write_text(json.dumps(config, indent=2), encoding="utf-8")
-    while True:
-        try:
-            device = await find_device(config["left"])
-            if device is not None:
-                await left_session(device, config, not args.no_right_battery)
-            else:
-                log("GAUCHE | En attente de la manette")
-        except Exception as exc:
-            log(f"GAUCHE | {type(exc).__name__}: {exc!r}")
-        await asyncio.sleep(5)
+    bridge = None
+    try:
+        if not args.no_obc:
+            from openbikecontrol import Bridge
+            bridge = Bridge(log, host=args.obc_host)
+            await bridge.start()
+        while True:
+            try:
+                device = await find_device(config["left"])
+                if device is not None:
+                    await left_session(device, config, not args.no_right_battery, bridge)
+                else:
+                    log("GAUCHE | En attente de la manette")
+            except Exception as exc:
+                log(f"GAUCHE | {type(exc).__name__}: {exc!r}")
+            await asyncio.sleep(5)
+    finally:
+        if bridge is not None:
+            await bridge.close()
 
 if __name__ == "__main__":
     restore_console = disable_quickedit()
