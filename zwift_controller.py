@@ -245,13 +245,19 @@ async def left_session(device, config, battery_enabled, bridge=None, recovery=No
         await disconnect(client)
         log("GAUCHE | Deconnectee")
 
-async def dual_sessions(config, bridge, read_right=True):
+async def dual_sessions(config, bridge, read_right=True, auto_reset=True, reset_after=45.0):
     scan_lock = asyncio.Lock()
     ready = set()
 
     async def worker(side, address, mask):
+        cached_device = None
+        recovery_started = None
+        failures = 0
         while True:
             client = None
+            reboot = False
+            connected_at = None
+            challenges = 0
             state = 0
             counts = {"rx": 0, "decoded": 0, "sync": 0}
             def emit(current):
@@ -263,24 +269,34 @@ async def dual_sessions(config, bridge, read_right=True):
                         bridge.button(button, pressed)
                 state = current
             def notify(sender, data):
+                nonlocal challenges, recovery_started, failures
                 counts["rx"] += 1
                 debug(f"{side} | RX ASYNC #{counts['rx']} | {bytes(data).hex(' ')}")
                 if bytes(data[:2]) == b"\xff\x03":
+                    challenges += 1
                     log(f"{side} | Challenge authentification Zwift recu (FF 03)")
                 current = decode_buttons(data)
                 if current is not None:
                     counts["decoded"] += 1
+                    if recovery_started is not None:
+                        log(f"{side} | RECOVERY | premiere trame apres {time.monotonic()-recovery_started:.2f}s")
+                        recovery_started = None
+                        failures = 0
                     emit(current)
             def sync_notify(sender, data):
                 counts["sync"] += 1
                 debug(f"{side} | RX SYNC #{counts['sync']} | {bytes(data).hex(' ')}")
             try:
                 async with scan_lock:
-                    device = await find_device(address)
+                    device = cached_device
+                    cached_device = None
+                    if device is None:
+                        device = await find_device(address)
                     if device is not None:
                         client = BleakClient(device, timeout=15)
                         log(f"{side} | Connexion...")
-                        await bounded(client.connect(), 20)
+                        await bounded(client.connect(), 8 if recovery_started is not None else 20)
+                        connected_at = time.monotonic()
                 if client is None:
                     log(f"{side} | En attente de la manette")
                 else:
@@ -303,13 +319,31 @@ async def dual_sessions(config, bridge, read_right=True):
                     next_battery = time.monotonic() + config["battery_interval"]
                     started = time.monotonic()
                     next_status = started
+                    next_keepalive = started + 3
                     while client.is_connected:
-                        await asyncio.sleep(3)
+                        await asyncio.sleep(0.1)
                         if not client.is_connected:
                             break
-                        await bounded(client.write_gatt_char(char, b"RideOn", response=response))
-                        debug(f"{side} | KEEPALIVE | OK")
                         now = time.monotonic()
+                        if (side == "GAUCHE" and auto_reset and challenges >= 2
+                                and now - connected_at >= reset_after):
+                            if failures >= 3:
+                                log(f"{side} | RECOVERY | 3 tentatives sans trame; nouvelle tentative dans 60s")
+                                await asyncio.sleep(60)
+                                failures = 0
+                            emit(0)
+                            recovery_started = time.monotonic()
+                            failures += 1
+                            log(f"{side} | RESET | preventif apres {now-connected_at:.2f}s | TX 18")
+                            await bounded(client.write_gatt_char(char, bytes([0x18]), response=response), 5)
+                            reboot = True
+                            cached_device = device
+                            await asyncio.sleep(0.25)
+                            break
+                        if now >= next_keepalive:
+                            await bounded(client.write_gatt_char(char, b"RideOn", response=response))
+                            debug(f"{side} | KEEPALIVE | OK")
+                            next_keepalive = now + 3
                         if now >= next_status:
                             debug(f"{side} | STATUS | connected=True | session={now-started:.1f}s | {counts}")
                             next_status = now + 10
@@ -327,7 +361,7 @@ async def dual_sessions(config, bridge, read_right=True):
                 if client is not None:
                     await disconnect(client)
                     log(f"{side} | Deconnectee | {counts}")
-            await asyncio.sleep(5)
+            await asyncio.sleep(0.25 if reboot else 1 if recovery_started is not None else 5)
 
     tasks = [
         asyncio.create_task(worker("GAUCHE", config["left"], LEFT_MASK)),
@@ -343,7 +377,8 @@ async def dual_sessions(config, bridge, read_right=True):
 
 async def main(argv=None, reset_event=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dual", action="store_true", help="Experimental independent left and right connections; no automatic reboot")
+    parser.add_argument("--dual", action="store_true", help="Independent left and right BLE connections")
+    parser.add_argument("--reset-after", type=float, default=45.0, help="Dual mode preventive left reboot delay in seconds (25-48)")
     parser.add_argument("--no-auto-reset", action="store_true", help="Disable experimental idle recovery")
     parser.add_argument("--debug", action="store_true", help="Log raw Bluetooth traffic to debug.log")
     parser.add_argument("--no-right-battery", action="store_true")
@@ -355,6 +390,8 @@ async def main(argv=None, reset_event=None):
     mode.add_argument("--keyboard", action="store_true", help="Send keys to foreground MyWhoosh")
     parser.add_argument("--obc-host", help="Local IPv4 address for discovery")
     args = parser.parse_args(argv)
+    if not 25 <= args.reset_after <= 48:
+        parser.error("--reset-after must be between 25 and 48 seconds")
     if args.discover:
         for device, adv in (await BleakScanner.discover(timeout=8, return_adv=True)).values():
             if "zwift click" in (adv.local_name or device.name or "").casefold():
@@ -363,7 +400,7 @@ async def main(argv=None, reset_event=None):
     config = load_config()
     if config["left"].upper() == config["right"].upper() or config["battery_interval"] < 60:
         raise ValueError("Configuration invalide")
-    print("MyWhoosh Controller - v0.6.3")
+    print("MyWhoosh Controller - v0.6.4")
     print("Mode dual : deux connexions." if args.dual else "Connexion principale gauche. CTRL+C pour quitter.")
     if not CONFIG.exists():
         CONFIG.write_text(json.dumps(config, indent=2), encoding="utf-8")
@@ -383,7 +420,7 @@ async def main(argv=None, reset_event=None):
             bridge = Bridge(log, host=args.obc_host)
             await bridge.start()
         if args.dual:
-            await dual_sessions(config, bridge, not args.no_right_battery)
+            await dual_sessions(config, bridge, not args.no_right_battery, not args.no_auto_reset, args.reset_after)
             return
         while True:
             try:
