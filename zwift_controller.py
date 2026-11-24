@@ -175,7 +175,9 @@ async def main():
     parser.add_argument("--no-right-battery", action="store_true")
     parser.add_argument("--discover", action="store_true",
                         help="List nearby Zwift Click addresses")
-    parser.add_argument("--no-obc", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--no-obc", action="store_true", help="Bluetooth only")
+    mode.add_argument("--keyboard", action="store_true", help="Send keys to foreground MyWhoosh")
     parser.add_argument("--obc-host", help="Local IPv4 address for discovery")
     args = parser.parse_args()
     if args.discover:
@@ -186,13 +188,17 @@ async def main():
     config = load_config()
     if config["left"].upper() == config["right"].upper() or config["battery_interval"] < 60:
         raise ValueError("Configuration invalide")
-    print("MyWhoosh Controller - v0.5")
+    print("MyWhoosh Controller - v0.5.1")
     print("Connexion principale gauche. CTRL+C pour quitter.")
     if not CONFIG.exists():
         CONFIG.write_text(json.dumps(config, indent=2), encoding="utf-8")
     bridge = None
     try:
-        if not args.no_obc:
+        if args.keyboard:
+            from keyboard_output import Keyboard
+            bridge = Keyboard(log, config.get("keyboard_mapping"))
+            await bridge.start()
+        elif not args.no_obc:
             from openbikecontrol import Bridge
             bridge = Bridge(log, host=args.obc_host)
             await bridge.start()
