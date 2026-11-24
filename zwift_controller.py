@@ -1,4 +1,9 @@
 import asyncio
+import argparse
+import json
+import os
+from pathlib import Path
+import time
 from datetime import datetime
 from bleak import BleakScanner, BleakClient
 
@@ -36,118 +41,161 @@ def changes(previous, current):
             for mask, name in BUTTONS.items()
             if (previous ^ current) & mask]
 
-class Controller:
-    def __init__(self, device):
-        self.device = device
-        self.side = "INCONNUE"
-        self.state = 0
-        self.battery = None
+CONFIG = Path(__file__).with_name("config.json")
+# Known pair from the v0.4 hardware test; override for another pair.
+DEFAULTS = {"left": "C8:54:6B:F3:6B:A7", "right": "C8:54:6B:08:A9:C2",
+            "battery_interval": 900}
 
-    @property
-    def label(self):
-        return f"{self.side} [{self.device.address}]"
+def load_config():
+    config = DEFAULTS.copy()
+    if CONFIG.exists():
+        config.update(json.loads(CONFIG.read_text(encoding="utf-8")))
+    return config
 
-    def emit(self, state):
-        for button, pressed, mask in changes(self.state, state):
-            log(f"{self.label} | {button} | {'ENFONCE' if pressed else 'RELACHE'} | 0x{mask:04X}")
-        self.state = state
+def disable_quickedit():
+    if os.name != "nt":
+        return lambda: None
+    import ctypes
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.GetStdHandle.argtypes = [wintypes.DWORD]
+    kernel.GetStdHandle.restype = wintypes.HANDLE
+    kernel.GetConsoleMode.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    kernel.SetConsoleMode.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    handle = kernel.GetStdHandle(-10 & 0xFFFFFFFF)
+    mode = wintypes.DWORD()
+    if kernel.GetConsoleMode(handle, ctypes.byref(mode)):
+        original = mode.value
+        if kernel.SetConsoleMode(handle, (original | 0x80) & ~0x40):
+            return lambda: kernel.SetConsoleMode(handle, original)
+    return lambda: None
 
-    def notify(self, sender, data):
-        state = decode_buttons(data)
-        if state is None:
-            return
-        if self.side == "INCONNUE":
-            left, right = bool(state & LEFT_MASK), bool(state & RIGHT_MASK)
-            if left != right:
-                self.side = "GAUCHE" if left else "DROITE"
-                log(f"Manette identifiee : {self.label}")
-        self.emit(state)
+async def bounded(awaitable, seconds=10):
+    return await asyncio.wait_for(awaitable, timeout=seconds)
 
-    def battery_notify(self, sender, data):
-        if data and data[0] <= 100 and data[0] != self.battery:
-            self.battery = data[0]
-            log(f"{self.label} | Batterie : {self.battery}%")
+async def disconnect(client):
+    try:
+        await bounded(client.disconnect(), 5)
+    except Exception as exc:
+        log(f"Deconnexion : {type(exc).__name__}: {exc!r}")
 
-    async def run(self, connection_lock):
-        try:
-            async with connection_lock:
-                log(f"{self.label} | Connexion...")
-                client = BleakClient(self.device, timeout=20)
-                try:
-                    await client.connect()
-                    log(f"{self.label} | Connectee")
-                    await client.start_notify(ZWIFT_ASYNC, self.notify)
-                    await client.start_notify(ZWIFT_SYNC_TX, lambda s, d: None)
-                    char = client.services.get_characteristic(ZWIFT_SYNC_RX)
-                    if char is None:
-                        raise RuntimeError("Sync RX introuvable")
-                    response = "write" in char.properties
-                    for payload in HANDSHAKE:
-                        await client.write_gatt_char(char, payload, response=response)
-                        await asyncio.sleep(0.3)
-                    log(f"{self.label} | Initialisation terminee")
-                    try:
-                        battery = client.services.get_characteristic(BATTERY)
-                        if battery:
-                            if "read" in battery.properties:
-                                self.battery_notify(battery, await client.read_gatt_char(battery))
-                            if "notify" in battery.properties:
-                                await client.start_notify(battery, self.battery_notify)
-                    except Exception as exc:
-                        log(f"{self.label} | Batterie indisponible : {exc}")
-                except BaseException:
-                    await client.disconnect()
-                    raise
-            try:
-                while client.is_connected:
-                    await asyncio.sleep(3)
-                    if client.is_connected:
-                        await client.write_gatt_char(char, b"RideOn", response=response)
-            finally:
-                await client.disconnect()
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            log(f"{self.label} | ERREUR : {exc}")
-        finally:
-            self.emit(0)
-            log(f"{self.label} | Deconnectee")
+async def find_device(address):
+    return await bounded(BleakScanner.find_device_by_address(address, timeout=5), 8)
+
+async def read_battery(client, side):
+    try:
+        data = await bounded(client.read_gatt_char(BATTERY), 5)
+        if len(data) == 1 and data[0] <= 100:
+            log(f"{side} | Batterie : {data[0]}%")
+            return True
+        log(f"{side} | Batterie : valeur invalide")
+    except Exception as exc:
+        log(f"{side} | Batterie indisponible : {type(exc).__name__}: {exc!r}")
+    return False
+
+async def right_battery(address):
+    client = None
+    try:
+        device = await find_device(address)
+        if device is None:
+            log("DROITE | Non detectee pour la batterie")
+            return False
+        client = BleakClient(device, timeout=10)
+        log("DROITE | Connexion temporaire pour la batterie")
+        await bounded(client.connect(), 15)
+        return await read_battery(client, "DROITE")
+    except Exception as exc:
+        log(f"DROITE | {type(exc).__name__}: {exc!r}")
+        return False
+    finally:
+        if client is not None:
+            await disconnect(client)
+            log("DROITE | Fin de connexion temporaire")
+
+async def left_session(device, config, battery_enabled):
+    client = BleakClient(device, timeout=15)
+    state = 0
+    battery_task = None
+    def emit(current):
+        nonlocal state
+        for button, pressed, mask in changes(state, current):
+            log(f"GAUCHE | {button} | {'ENFONCE' if pressed else 'RELACHE'} | 0x{mask:04X}")
+        state = current
+    def notify(sender, data):
+        current = decode_buttons(data)
+        if current is not None:
+            emit(current)
+    async def batteries():
+        while client.is_connected:
+            success = await right_battery(config["right"])
+            await asyncio.sleep(config["battery_interval"] if success else 60)
+    try:
+        log("GAUCHE | Connexion...")
+        await bounded(client.connect(), 20)
+        await bounded(client.start_notify(ZWIFT_ASYNC, notify))
+        await bounded(client.start_notify(ZWIFT_SYNC_TX, lambda s, d: None))
+        char = client.services.get_characteristic(ZWIFT_SYNC_RX)
+        if char is None:
+            raise RuntimeError("Sync RX introuvable")
+        response = "write" in char.properties
+        for payload in HANDSHAKE:
+            await bounded(client.write_gatt_char(char, payload, response=response))
+            await asyncio.sleep(0.3)
+        log("GAUCHE | Initialisation terminee - 10 boutons")
+        await read_battery(client, "GAUCHE")
+        if battery_enabled:
+            battery_task = asyncio.create_task(batteries())
+        next_battery = time.monotonic() + config["battery_interval"]
+        while client.is_connected:
+            await asyncio.sleep(3)
+            if not client.is_connected:
+                break
+            await bounded(client.write_gatt_char(char, b"RideOn", response=response))
+            if time.monotonic() >= next_battery:
+                await read_battery(client, "GAUCHE")
+                next_battery = time.monotonic() + config["battery_interval"]
+    finally:
+        if battery_task is not None:
+            battery_task.cancel()
+            await asyncio.gather(battery_task, return_exceptions=True)
+        emit(0)
+        await disconnect(client)
+        log("GAUCHE | Deconnectee")
 
 async def main():
-    print("MyWhoosh Controller - v0.4")
-    print("Reveille les deux manettes. CTRL+C pour quitter.")
-    tasks = {}
-    lock = asyncio.Lock()
-    try:
-        while True:
-            for address, task in list(tasks.items()):
-                if task.done():
-                    await task
-                    del tasks[address]
-            if len(tasks) < 2:
-                try:
-                    # Do not scan while another connection is being initialized.
-                    async with lock:
-                        results = await BleakScanner.discover(timeout=5, return_adv=True)
-                    for device, adv in results.values():
-                        name = adv.local_name or device.name or ""
-                        if "zwift click" not in name.casefold():
-                            continue
-                        address = device.address.upper()
-                        if address in tasks or len(tasks) >= 2:
-                            continue
-                        log(f"Manette detectee : {name} [{address}]")
-                        tasks[address] = asyncio.create_task(Controller(device).run(lock))
-                except Exception as exc:
-                    log(f"Erreur recherche BLE : {exc}")
-            await asyncio.sleep(2)
-    finally:
-        for task in tasks.values():
-            task.cancel()
-        await asyncio.gather(*tasks.values(), return_exceptions=True)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--no-right-battery", action="store_true")
+    parser.add_argument("--discover", action="store_true",
+                        help="List nearby Zwift Click addresses")
+    args = parser.parse_args()
+    if args.discover:
+        for device, adv in (await BleakScanner.discover(timeout=8, return_adv=True)).values():
+            if "zwift click" in (adv.local_name or device.name or "").casefold():
+                log(f"Zwift Click : {device.address}")
+        return
+    config = load_config()
+    if config["left"].upper() == config["right"].upper() or config["battery_interval"] < 60:
+        raise ValueError("Configuration invalide")
+    print("MyWhoosh Controller - v0.4.1")
+    print("Connexion principale gauche. CTRL+C pour quitter.")
+    if not CONFIG.exists():
+        CONFIG.write_text(json.dumps(config, indent=2), encoding="utf-8")
+    while True:
+        try:
+            device = await find_device(config["left"])
+            if device is not None:
+                await left_session(device, config, not args.no_right_battery)
+            else:
+                log("GAUCHE | En attente de la manette")
+        except Exception as exc:
+            log(f"GAUCHE | {type(exc).__name__}: {exc!r}")
+        await asyncio.sleep(5)
 
 if __name__ == "__main__":
+    restore_console = disable_quickedit()
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
         print("\nProgramme arrete.")
+    finally:
+        restore_console()
