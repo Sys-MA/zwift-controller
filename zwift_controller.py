@@ -245,7 +245,7 @@ async def left_session(device, config, battery_enabled, bridge=None, recovery=No
         await disconnect(client)
         log("GAUCHE | Deconnectee")
 
-async def dual_sessions(config, bridge, read_right=True, auto_reset=True, reset_after=45.0, refresh_handshake=False, fast_reconnect=False):
+async def dual_sessions(config, bridge, read_right=True, auto_reset=True, reset_after=45.0, refresh_handshake=False, fast_reconnect=False, reset_event=None):
     scan_lock = asyncio.Lock()
     ready = set()
 
@@ -253,12 +253,15 @@ async def dual_sessions(config, bridge, read_right=True, auto_reset=True, reset_
         cached_device = None
         recovery_started = None
         failures = 0
+        next_reset_allowed = 0.0
         while True:
             client = None
             reboot = False
             accepting_frames = True
             connected_at = None
             use_cache = False
+            device = None
+            initialized = False
             challenges = 0
             state = 0
             counts = {"rx": 0, "decoded": 0, "sync": 0}
@@ -277,6 +280,8 @@ async def dual_sessions(config, bridge, read_right=True, auto_reset=True, reset_
                 if bytes(data[:2]) == b"\xff\x03":
                     challenges += 1
                     log(f"{side} | Challenge authentification Zwift recu (FF 03)")
+                    if challenges == 2:
+                        log(f"{side} | AUTH | Renouvellement Zwift recommande")
                 current = decode_buttons(data)
                 if current is not None and accepting_frames:
                     counts["decoded"] += 1
@@ -320,6 +325,7 @@ async def dual_sessions(config, bridge, read_right=True, auto_reset=True, reset_
                         await bounded(client.write_gatt_char(char, payload, response=response))
                         await asyncio.sleep(0.3)
                     log(f"{side} | TIMING | handshake en {time.monotonic()-handshake_started:.3f}s")
+                    initialized = True
                     ready.add(side)
                     if bridge is not None:
                         bridge.set_ready(True)
@@ -346,17 +352,19 @@ async def dual_sessions(config, bridge, read_right=True, auto_reset=True, reset_
                             log(f"{side} | REFRESH | termine en {time.monotonic()-refresh_started:.2f}s | connected={client.is_connected} | decoded={counts['decoded']}")
                             next_refresh = time.monotonic() + reset_after
                             now = time.monotonic()
-                        if (side == "GAUCHE" and auto_reset and not refresh_handshake and challenges >= 2
-                                and now - connected_at >= reset_after):
-                            if failures >= 3:
-                                log(f"{side} | RECOVERY | 3 tentatives sans trame; nouvelle tentative dans 60s")
-                                await asyncio.sleep(60)
-                                failures = 0
+                        manual = side == "GAUCHE" and reset_event is not None and reset_event.is_set()
+                        automatic = (side == "GAUCHE" and auto_reset and not refresh_handshake
+                                     and challenges >= 2 and now - connected_at >= reset_after
+                                     and now >= next_reset_allowed)
+                        if manual or automatic:
+                            if manual:
+                                reset_event.clear()
+                            next_reset_allowed = now + 60
                             accepting_frames = False
                             emit(0)
                             recovery_started = time.monotonic()
                             failures += 1
-                            log(f"{side} | RESET | preventif apres {now-connected_at:.2f}s | TX 18")
+                            log(f"{side} | RESET | {'manuel' if manual else 'preventif'} apres {now-connected_at:.2f}s | TX 18")
                             await bounded(client.write_gatt_char(char, bytes([0x18]), response=response), 5)
                             reboot = True
                             cached_device = device
@@ -388,7 +396,10 @@ async def dual_sessions(config, bridge, read_right=True, auto_reset=True, reset_
                     await disconnect(client)
                     log(f"{side} | TIMING | deconnexion en {time.monotonic()-disconnect_started:.3f}s")
                     log(f"{side} | Deconnectee | {counts}")
-            await asyncio.sleep((0.10 if fast_reconnect else 0.25) if reboot else 1 if recovery_started is not None else 5)
+            if fast_reconnect and initialized and not reboot and device is not None:
+                cached_device = device
+                recovery_started = time.monotonic()
+            await asyncio.sleep((0.10 if fast_reconnect else 0.25) if reboot else 0.25 if cached_device is not None else 1 if recovery_started is not None else 5)
 
     tasks = [
         asyncio.create_task(worker("GAUCHE", config["left"], LEFT_MASK)),
@@ -433,7 +444,7 @@ async def main(argv=None, reset_event=None):
     config = load_config()
     if config["left"].upper() == config["right"].upper() or config["battery_interval"] < 60:
         raise ValueError("Configuration invalide")
-    print("MyWhoosh Controller - v0.6.6")
+    print("MyWhoosh Controller - v0.7.0")
     print("Mode dual : deux connexions." if args.dual else "Connexion principale gauche. CTRL+C pour quitter.")
     if not CONFIG.exists():
         CONFIG.write_text(json.dumps(config, indent=2), encoding="utf-8")
@@ -453,7 +464,7 @@ async def main(argv=None, reset_event=None):
             bridge = Bridge(log, host=args.obc_host)
             await bridge.start()
         if args.dual:
-            await dual_sessions(config, bridge, not args.no_right_battery, not args.no_auto_reset, args.reset_after, args.refresh_handshake, args.fast_reconnect)
+            await dual_sessions(config, bridge, not args.no_right_battery, not args.no_auto_reset, args.reset_after, args.refresh_handshake, args.fast_reconnect, reset_event)
             return
         while True:
             try:
