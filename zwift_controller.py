@@ -245,7 +245,7 @@ async def left_session(device, config, battery_enabled, bridge=None, recovery=No
         await disconnect(client)
         log("GAUCHE | Deconnectee")
 
-async def dual_sessions(config, bridge, read_right=True, auto_reset=True, reset_after=45.0):
+async def dual_sessions(config, bridge, read_right=True, auto_reset=True, reset_after=45.0, refresh_handshake=False):
     scan_lock = asyncio.Lock()
     ready = set()
 
@@ -256,6 +256,7 @@ async def dual_sessions(config, bridge, read_right=True, auto_reset=True, reset_
         while True:
             client = None
             reboot = False
+            accepting_frames = True
             connected_at = None
             challenges = 0
             state = 0
@@ -276,7 +277,7 @@ async def dual_sessions(config, bridge, read_right=True, auto_reset=True, reset_
                     challenges += 1
                     log(f"{side} | Challenge authentification Zwift recu (FF 03)")
                 current = decode_buttons(data)
-                if current is not None:
+                if current is not None and accepting_frames:
                     counts["decoded"] += 1
                     if recovery_started is not None:
                         log(f"{side} | RECOVERY | premiere trame apres {time.monotonic()-recovery_started:.2f}s")
@@ -320,17 +321,29 @@ async def dual_sessions(config, bridge, read_right=True, auto_reset=True, reset_
                     started = time.monotonic()
                     next_status = started
                     next_keepalive = started + 3
+                    next_refresh = connected_at + reset_after
                     while client.is_connected:
                         await asyncio.sleep(0.1)
                         if not client.is_connected:
                             break
                         now = time.monotonic()
-                        if (side == "GAUCHE" and auto_reset and challenges >= 2
+                        if side == "GAUCHE" and refresh_handshake and now >= next_refresh:
+                            log(f"{side} | REFRESH | debut sans deconnexion | decoded={counts['decoded']} | challenges={challenges}")
+                            refresh_started = time.monotonic()
+                            for payload in HANDSHAKE:
+                                debug(f"{side} | TX REFRESH | {payload.hex(' ')}")
+                                await bounded(client.write_gatt_char(char, payload, response=response))
+                                await asyncio.sleep(0.3)
+                            log(f"{side} | REFRESH | termine en {time.monotonic()-refresh_started:.2f}s | connected={client.is_connected} | decoded={counts['decoded']}")
+                            next_refresh = time.monotonic() + reset_after
+                            now = time.monotonic()
+                        if (side == "GAUCHE" and auto_reset and not refresh_handshake and challenges >= 2
                                 and now - connected_at >= reset_after):
                             if failures >= 3:
                                 log(f"{side} | RECOVERY | 3 tentatives sans trame; nouvelle tentative dans 60s")
                                 await asyncio.sleep(60)
                                 failures = 0
+                            accepting_frames = False
                             emit(0)
                             recovery_started = time.monotonic()
                             failures += 1
@@ -378,6 +391,7 @@ async def dual_sessions(config, bridge, read_right=True, auto_reset=True, reset_
 async def main(argv=None, reset_event=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--dual", action="store_true", help="Independent left and right BLE connections")
+    parser.add_argument("--refresh-handshake", action="store_true", help="Experimental in-place handshake refresh in dual mode, without preventive reboot")
     parser.add_argument("--reset-after", type=float, default=45.0, help="Dual mode preventive left reboot delay in seconds (25-48)")
     parser.add_argument("--no-auto-reset", action="store_true", help="Disable experimental idle recovery")
     parser.add_argument("--debug", action="store_true", help="Log raw Bluetooth traffic to debug.log")
@@ -390,6 +404,8 @@ async def main(argv=None, reset_event=None):
     mode.add_argument("--keyboard", action="store_true", help="Send keys to foreground MyWhoosh")
     parser.add_argument("--obc-host", help="Local IPv4 address for discovery")
     args = parser.parse_args(argv)
+    if args.refresh_handshake and not args.dual:
+        parser.error("--refresh-handshake requires --dual")
     if not 25 <= args.reset_after <= 48:
         parser.error("--reset-after must be between 25 and 48 seconds")
     if args.discover:
@@ -400,7 +416,7 @@ async def main(argv=None, reset_event=None):
     config = load_config()
     if config["left"].upper() == config["right"].upper() or config["battery_interval"] < 60:
         raise ValueError("Configuration invalide")
-    print("MyWhoosh Controller - v0.6.4")
+    print("MyWhoosh Controller - v0.6.5")
     print("Mode dual : deux connexions." if args.dual else "Connexion principale gauche. CTRL+C pour quitter.")
     if not CONFIG.exists():
         CONFIG.write_text(json.dumps(config, indent=2), encoding="utf-8")
@@ -420,7 +436,7 @@ async def main(argv=None, reset_event=None):
             bridge = Bridge(log, host=args.obc_host)
             await bridge.start()
         if args.dual:
-            await dual_sessions(config, bridge, not args.no_right_battery, not args.no_auto_reset, args.reset_after)
+            await dual_sessions(config, bridge, not args.no_right_battery, not args.no_auto_reset, args.reset_after, args.refresh_handshake)
             return
         while True:
             try:
