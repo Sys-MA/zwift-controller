@@ -56,8 +56,10 @@ class App:
         self.tray = None
         self.quitting = False
         self.restart = False
+        self.reset_event = threading.Event()
+        self.reset_count = 0
         self.config = core.load_config()
-        root.title("Zwift Controller 0.6")
+        root.title("Zwift Controller 0.6.2")
         root.geometry("650x690")
         root.minsize(590, 640)
         root.protocol("WM_DELETE_WINDOW", self.hide)
@@ -107,6 +109,9 @@ class App:
         controls.grid(sticky="ew", pady=6)
         ttk.Button(controls, text="Appliquer / reconnecter", command=self.apply).pack(side="left")
         ttk.Button(controls, text="Arreter", command=self.stop).pack(side="left", padx=8)
+        self.reset_label = tk.StringVar(value="Reboots : 0")
+        ttk.Button(controls, text="Redemarrer", command=self.request_reset).pack(side="left")
+        ttk.Label(controls, textvariable=self.reset_label).pack(side="left", padx=6)
         ttk.Button(controls, text="Quitter", command=self.quit).pack(side="right")
         self.logs = tk.Text(frame, height=8, wrap="word", state="disabled", font=("Consolas", 9))
         self.logs.grid(sticky="nsew", pady=(8,0))
@@ -141,6 +146,12 @@ class App:
         else:
             self.root.iconify()
 
+    def request_reset(self):
+        if self.worker and self.worker.is_alive():
+            self.reset_event.set()
+        else:
+            self.start()
+
     def start(self):
         if self.worker and self.worker.is_alive():
             return
@@ -153,7 +164,7 @@ class App:
                 self.loop = asyncio.get_running_loop()
                 self.task = asyncio.current_task()
                 try:
-                    await core.main(args)
+                    await core.main(args, reset_event=self.reset_event)
                 except asyncio.CancelledError:
                     pass
                 except Exception as exc:
@@ -170,6 +181,7 @@ class App:
 
     def stop(self):
         self.restart = False
+        self.reset_event.clear()
         self.status.set("Arret en cours...")
         loop, task = self.loop, self.task
         if loop and task:
@@ -238,6 +250,9 @@ class App:
                     self.restart = False
                     self.root.after(150, self.start)
             elif event == "log":
+                if value.startswith("RESET | Commande envoyee"):
+                    self.reset_count += 1
+                    self.reset_label.set(f"Reboots : {self.reset_count}")
                 match = re.search(r"(GAUCHE|DROITE) \| Batterie : (\d+)%", value)
                 if match:
                     self.levels[match[1]].set(f"Batterie : {match[2]} % (derniere lecture)")
