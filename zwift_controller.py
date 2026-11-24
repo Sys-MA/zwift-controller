@@ -22,10 +22,19 @@ BUTTONS = {
 LEFT_MASK = 0x010F
 RIGHT_MASK = 0x10F0
 
+DEBUG_FILE = None
+
+def debug(message):
+    if DEBUG_FILE is not None:
+        log(message)
+
 def log(message):
-    if sys.stdout is None:
-        return
-    print(f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] {message}", flush=True)
+    line = f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] {message}"
+    if sys.stdout is not None:
+        print(line, flush=True)
+    if DEBUG_FILE is not None:
+        DEBUG_FILE.write(line + "\n")
+        DEBUG_FILE.flush()
 
 def decode_buttons(data):
     if len(data) < 3 or data[:2] != bytes([0x23, 0x08]):
@@ -121,6 +130,22 @@ async def left_session(device, config, battery_enabled, bridge=None):
     client = BleakClient(device, timeout=15)
     state = 0
     battery_task = None
+    status_task = None
+    counts = {"async": 0, "sync": 0, "decoded": 0, "keepalive": 0}
+    last_rx = None
+    started = time.monotonic()
+    def received(channel, data):
+        nonlocal last_rx
+        counts[channel] += 1
+        last_rx = time.monotonic()
+        debug(f"RX {channel.upper()} #{counts[channel]} | {bytes(data).hex(' ')}")
+    def sync_notify(sender, data):
+        received("sync", data)
+    async def status():
+        while True:
+            await asyncio.sleep(10)
+            age = "jamais" if last_rx is None else f"{time.monotonic()-last_rx:.1f}s"
+            debug(f"STATUS | connected={client.is_connected} | session={time.monotonic()-started:.1f}s | RX_ASYNC={counts['async']} | RX_SYNC={counts['sync']} | decoded={counts['decoded']} | keepalive={counts['keepalive']} | last_rx={age}")
     def emit(current):
         nonlocal state
         for button, pressed, mask in changes(state, current):
@@ -129,9 +154,13 @@ async def left_session(device, config, battery_enabled, bridge=None):
                 bridge.button(button, pressed)
         state = current
     def notify(sender, data):
+        received("async", data)
         current = decode_buttons(data)
         if current is not None:
+            counts["decoded"] += 1
             emit(current)
+        else:
+            debug("RX ASYNC | message non decode comme bouton")
     async def batteries():
         while client.is_connected:
             success = await right_battery(config["right"])
@@ -139,14 +168,21 @@ async def left_session(device, config, battery_enabled, bridge=None):
     try:
         log("GAUCHE | Connexion...")
         await bounded(client.connect(), 20)
+        debug("BLE | Connexion GATT etablie")
+        if DEBUG_FILE is not None:
+            status_task = asyncio.create_task(status())
         await bounded(client.start_notify(ZWIFT_ASYNC, notify))
-        await bounded(client.start_notify(ZWIFT_SYNC_TX, lambda s, d: None))
+        await bounded(client.start_notify(ZWIFT_SYNC_TX, sync_notify))
+        debug("BLE | Abonnements ASYNC et SYNC_TX actifs")
         char = client.services.get_characteristic(ZWIFT_SYNC_RX)
         if char is None:
             raise RuntimeError("Sync RX introuvable")
         response = "write" in char.properties
+        debug(f"BLE | Sync RX properties={char.properties} | response={response}")
         for payload in HANDSHAKE:
+            debug(f"TX HANDSHAKE | {payload.hex(' ')}")
             await bounded(client.write_gatt_char(char, payload, response=response))
+            debug("TX HANDSHAKE | OK")
             await asyncio.sleep(0.3)
         log("GAUCHE | Initialisation terminee - 10 boutons")
         if bridge is not None:
@@ -159,11 +195,18 @@ async def left_session(device, config, battery_enabled, bridge=None):
             await asyncio.sleep(3)
             if not client.is_connected:
                 break
+            debug("TX KEEPALIVE | RideOn")
             await bounded(client.write_gatt_char(char, b"RideOn", response=response))
+            counts["keepalive"] += 1
+            debug(f"KEEPALIVE | OK #{counts['keepalive']}")
             if time.monotonic() >= next_battery:
                 await read_battery(client, "GAUCHE")
                 next_battery = time.monotonic() + config["battery_interval"]
     finally:
+        if status_task is not None:
+            status_task.cancel()
+            await asyncio.gather(status_task, return_exceptions=True)
+        debug(f"STATUS FINAL | {counts}")
         if battery_task is not None:
             battery_task.cancel()
             await asyncio.gather(battery_task, return_exceptions=True)
@@ -175,6 +218,7 @@ async def left_session(device, config, battery_enabled, bridge=None):
 
 async def main(argv=None):
     parser = argparse.ArgumentParser()
+    parser.add_argument("--debug", action="store_true", help="Log raw Bluetooth traffic to debug.log")
     parser.add_argument("--no-right-battery", action="store_true")
     parser.add_argument("--discover", action="store_true",
                         help="List nearby Zwift Click addresses")
@@ -192,12 +236,16 @@ async def main(argv=None):
     config = load_config()
     if config["left"].upper() == config["right"].upper() or config["battery_interval"] < 60:
         raise ValueError("Configuration invalide")
-    print("MyWhoosh Controller - v0.6")
+    print("MyWhoosh Controller - v0.6.1")
     print("Connexion principale gauche. CTRL+C pour quitter.")
     if not CONFIG.exists():
         CONFIG.write_text(json.dumps(config, indent=2), encoding="utf-8")
+    global DEBUG_FILE
+    if args.debug:
+        DEBUG_FILE = CONFIG.with_name("debug.log").open("a", encoding="utf-8")
     bridge = None
     try:
+        debug(f"DEBUG | session {datetime.now().isoformat()} | right_battery={not args.no_right_battery}")
         if not args.obc and not args.no_obc:
             from keyboard_output import Keyboard
             bridge = Keyboard(log, config.get("keyboard_mapping"))
@@ -217,8 +265,13 @@ async def main(argv=None):
                 log(f"GAUCHE | {type(exc).__name__}: {exc!r}")
             await asyncio.sleep(5)
     finally:
-        if bridge is not None:
-            await bridge.close()
+        try:
+            if bridge is not None:
+                await bridge.close()
+        finally:
+            if DEBUG_FILE is not None:
+                DEBUG_FILE.close()
+                DEBUG_FILE = None
 
 if __name__ == "__main__":
     restore_console = disable_quickedit()
