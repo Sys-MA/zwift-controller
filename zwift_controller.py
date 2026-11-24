@@ -126,13 +126,15 @@ async def right_battery(address):
             await disconnect(client)
             log("DROITE | Fin de connexion temporaire")
 
-async def left_session(device, config, battery_enabled, bridge=None):
+async def left_session(device, config, battery_enabled, bridge=None, recovery=None, reset_event=None):
     client = BleakClient(device, timeout=15)
     state = 0
     battery_task = None
     status_task = None
     counts = {"async": 0, "sync": 0, "decoded": 0, "keepalive": 0}
     last_rx = None
+    last_button_frame = time.monotonic()
+    challenge = False
     started = time.monotonic()
     def received(channel, data):
         nonlocal last_rx
@@ -154,10 +156,17 @@ async def left_session(device, config, battery_enabled, bridge=None):
                 bridge.button(button, pressed)
         state = current
     def notify(sender, data):
+        nonlocal last_button_frame, challenge
         received("async", data)
+        if bytes(data[:2]) == b"\xff\x03":
+            challenge = True
+            log("GAUCHE | Challenge authentification Zwift recu (FF 03)")
         current = decode_buttons(data)
         if current is not None:
             counts["decoded"] += 1
+            last_button_frame = time.monotonic()
+            if recovery is not None:
+                recovery["failures"] = 0
             emit(current)
         else:
             debug("RX ASYNC | message non decode comme bouton")
@@ -190,10 +199,30 @@ async def left_session(device, config, battery_enabled, bridge=None):
         await read_battery(client, "GAUCHE", bridge)
         if battery_enabled:
             battery_task = asyncio.create_task(batteries())
+        last_button_frame = time.monotonic()
         next_battery = time.monotonic() + config["battery_interval"]
         while client.is_connected:
             await asyncio.sleep(3)
             if not client.is_connected:
+                break
+            now = time.monotonic()
+            manual = reset_event is not None and reset_event.is_set()
+            auto = (recovery is not None and now - last_button_frame >= 55
+                    and now >= recovery["next_allowed"])
+            if manual or auto:
+                if manual:
+                    reset_event.clear()
+                if recovery is not None:
+                    recovery["failures"] += 1
+                    recovery["next_allowed"] = now + (300 if recovery["failures"] >= 3 else 60)
+                if battery_task is not None:
+                    battery_task.cancel()
+                    await asyncio.gather(battery_task, return_exceptions=True)
+                    battery_task = None
+                log(f"RESET | GAUCHE | {'manuel' if manual else 'absence de trames boutons depuis 55s'} | TX 18 | challenge={challenge}")
+                await bounded(client.write_gatt_char(char, bytes([0x18]), response=response), 5)
+                log("RESET | Commande envoyee, reconnexion apres 5s")
+                await asyncio.sleep(1)
                 break
             debug("TX KEEPALIVE | RideOn")
             await bounded(client.write_gatt_char(char, b"RideOn", response=response))
@@ -216,8 +245,9 @@ async def left_session(device, config, battery_enabled, bridge=None):
         await disconnect(client)
         log("GAUCHE | Deconnectee")
 
-async def main(argv=None):
+async def main(argv=None, reset_event=None):
     parser = argparse.ArgumentParser()
+    parser.add_argument("--no-auto-reset", action="store_true", help="Disable experimental idle recovery")
     parser.add_argument("--debug", action="store_true", help="Log raw Bluetooth traffic to debug.log")
     parser.add_argument("--no-right-battery", action="store_true")
     parser.add_argument("--discover", action="store_true",
@@ -236,13 +266,14 @@ async def main(argv=None):
     config = load_config()
     if config["left"].upper() == config["right"].upper() or config["battery_interval"] < 60:
         raise ValueError("Configuration invalide")
-    print("MyWhoosh Controller - v0.6.1")
+    print("MyWhoosh Controller - v0.6.2")
     print("Connexion principale gauche. CTRL+C pour quitter.")
     if not CONFIG.exists():
         CONFIG.write_text(json.dumps(config, indent=2), encoding="utf-8")
     global DEBUG_FILE
     if args.debug:
         DEBUG_FILE = CONFIG.with_name("debug.log").open("a", encoding="utf-8")
+    recovery = None if args.no_auto_reset else {"failures": 0, "next_allowed": 0.0}
     bridge = None
     try:
         debug(f"DEBUG | session {datetime.now().isoformat()} | right_battery={not args.no_right_battery}")
@@ -258,7 +289,7 @@ async def main(argv=None):
             try:
                 device = await find_device(config["left"])
                 if device is not None:
-                    await left_session(device, config, not args.no_right_battery, bridge)
+                    await left_session(device, config, not args.no_right_battery, bridge, recovery, reset_event)
                 else:
                     log("GAUCHE | En attente de la manette")
             except Exception as exc:
