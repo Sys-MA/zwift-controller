@@ -1,4 +1,4 @@
-# Zwift Controller v0.6
+# Zwift Controller v0.6.2
 
 Windows desktop bridge for Zwift Click V2 and MyWhoosh. Keyboard mode is the default; I/K gear shortcuts were confirmed on hardware in v0.5.1. OpenBikeControl is experimental.
 
@@ -19,3 +19,7 @@ Keep MyWhoosh in the foreground while riding. Close the desktop window to minimi
 ## Build executable
 
 Run `powershell -ExecutionPolicy Bypass -File .\build.ps1` from the repository. The script installs build dependencies, runs tests, and builds dist/ZwiftController.exe. The executable stores config.json in %LOCALAPPDATA%/ZwiftController; source mode uses the repository config.json. Move the executable to a permanent location before enabling autostart. GUI and packaged executable require Windows validation.
+
+## Experimental recovery
+
+The left pod is rebooted with a single 0x18 GATT command after 55 seconds without a decoded button frame; ordinary inactivity can also trigger this. Reconnect follows after five seconds. Three unsuccessful attempts trigger a five-minute cooldown. The desktop Redemarrer button requests a manual reboot of the left pod. This is not a Zwift unlock or authentication renewal and may not restore a locked pod. Disable automatic resets with `--no-auto-reset` in console mode. Use `--debug --no-right-battery --no-obc` to isolate Bluetooth and append diagnostics to debug.log. Protocol reference: https://github.com/thomaschampagne/zwiftboard/blob/main/internal/zwift/protocol.go .
