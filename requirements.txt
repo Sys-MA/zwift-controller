@@ -1,2 +1,4 @@
 bleak>=0.22,<3
 zeroconf>=0.132,<1
+pystray>=0.19,<1
+Pillow>=10,<13
