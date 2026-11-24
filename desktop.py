@@ -112,7 +112,6 @@ class App:
         self.logs.grid(sticky="nsew", pady=(8,0))
         self.setup_tray()
         self.root.after(100, self.poll)
-        self.start()
 
     def toggle_auto(self):
         try:
@@ -263,6 +262,7 @@ def main():
         original(message)
         app.events.put(("log", message))
     core.log = log
+    app.start()
     if "--minimized" in sys.argv:
         root.after(700, app.hide)
     root.mainloop()
