@@ -2,6 +2,7 @@ import asyncio
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 import time
 from datetime import datetime
@@ -22,6 +23,8 @@ LEFT_MASK = 0x010F
 RIGHT_MASK = 0x10F0
 
 def log(message):
+    if sys.stdout is None:
+        return
     print(f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] {message}", flush=True)
 
 def decode_buttons(data):
@@ -170,16 +173,17 @@ async def left_session(device, config, battery_enabled, bridge=None):
         await disconnect(client)
         log("GAUCHE | Deconnectee")
 
-async def main():
+async def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--no-right-battery", action="store_true")
     parser.add_argument("--discover", action="store_true",
                         help="List nearby Zwift Click addresses")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--no-obc", action="store_true", help="Bluetooth only")
+    mode.add_argument("--obc", action="store_true", help="Experimental OpenBikeControl")
     mode.add_argument("--keyboard", action="store_true", help="Send keys to foreground MyWhoosh")
     parser.add_argument("--obc-host", help="Local IPv4 address for discovery")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if args.discover:
         for device, adv in (await BleakScanner.discover(timeout=8, return_adv=True)).values():
             if "zwift click" in (adv.local_name or device.name or "").casefold():
@@ -188,17 +192,17 @@ async def main():
     config = load_config()
     if config["left"].upper() == config["right"].upper() or config["battery_interval"] < 60:
         raise ValueError("Configuration invalide")
-    print("MyWhoosh Controller - v0.5.1")
+    print("MyWhoosh Controller - v0.6")
     print("Connexion principale gauche. CTRL+C pour quitter.")
     if not CONFIG.exists():
         CONFIG.write_text(json.dumps(config, indent=2), encoding="utf-8")
     bridge = None
     try:
-        if args.keyboard:
+        if not args.obc and not args.no_obc:
             from keyboard_output import Keyboard
             bridge = Keyboard(log, config.get("keyboard_mapping"))
             await bridge.start()
-        elif not args.no_obc:
+        elif args.obc:
             from openbikecontrol import Bridge
             bridge = Bridge(log, host=args.obc_host)
             await bridge.start()
