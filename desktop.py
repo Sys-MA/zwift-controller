@@ -16,6 +16,7 @@ import webbrowser
 from instance_lock import single_instance, InstanceUnavailable
 from version import VERSION
 import updater
+from game_presence import GamePolicy, game_running
 from zwift_auth import Session, AuthError
 from bike_icon import make_icon
 
@@ -242,6 +243,8 @@ class App:
         self.tray = None
         self.quitting = False
         self.restart = False
+        self.stopping = False
+        self.game_policy = GamePolicy()
         self.reset_event = threading.Event()
         self.auth_reconnect = threading.Event()
         self.zwift_session = Session()
@@ -496,18 +499,20 @@ class App:
         auto_reset = tk.BooleanVar(value=self.config.get("auto_reset", False))
         fast = tk.BooleanVar(value=self.config.get("fast_reconnect", True))
         diag = tk.BooleanVar(value=self.config.get("diagnostics", False))
+        auto_game = tk.BooleanVar(value=self.config.get("auto_mywhoosh", False))
         auto = tk.BooleanVar(value=autostart_enabled())
         ttk.Label(frame, text="Mode de sortie", font=("Segoe UI", 12, "bold")).pack(anchor="w")
         ModernSelect(frame, textvariable=mode, values=("Clavier","OpenBikeControl","Bluetooth seulement"), width=30).pack(fill="x", pady=(4,12))
-        for title, var in (("Demarrer avec Windows", auto), ("Reconnexion rapide (cache GATT Windows)", fast), ("Redemarrage de secours (gauche)", auto_reset), ("Logs de diagnostic detailles", diag)):
+        for title, var in (("Démarrer avec Windows", auto), ("Connecter les manettes seulement lorsque MyWhoosh est ouvert", auto_game), ("Reconnexion rapide (cache GATT Windows)", fast), ("Redemarrage de secours (gauche)", auto_reset), ("Logs de diagnostic detailles", diag)):
             ttk.Checkbutton(frame, text=title, variable=var).pack(anchor="w", pady=4)
+        ttk.Label(frame, text="En mode automatique, les manettes sont libérées après 10 secondes sans MyWhoosh. Les commandes manuelles restent disponibles.", wraplength=390, foreground="#526478").pack(anchor="w", pady=(6,0))
         def save():
             try:
                 set_autostart(auto.get())
             except OSError as exc:
                 messagebox.showerror("Options", str(exc), parent=win)
                 return
-            if self.save_settings({"output_mode":mode.get(),"auto_reset":auto_reset.get(),"fast_reconnect":fast.get(),"diagnostics":diag.get()}, win):
+            if self.save_settings({"output_mode":mode.get(),"auto_reset":auto_reset.get(),"fast_reconnect":fast.get(),"diagnostics":diag.get(),"auto_mywhoosh":auto_game.get()}, win):
                 win.destroy()
         ttk.Button(frame, text="Compte Zwift", command=self.open_account).pack(anchor="w", pady=(14,0))
         ttk.Button(frame, text="Vérifier les mises à jour", command=lambda: self.check_update(True)).pack(anchor="w", pady=(8,0))
@@ -642,13 +647,71 @@ class App:
         except OSError as exc:
             messagebox.showerror("Configuration", str(exc), parent=parent)
             return False
+        was_auto = self.auto_game_enabled()
         self.config = candidate
-        self.reconnect()
+        if self.auto_game_enabled():
+            if not was_auto:
+                self.game_policy = GamePolicy()
+                self.sample_game()
+            if self.game_policy.desired:
+                self.restart_worker()
+            else:
+                self.apply_game_policy()
+        else:
+            self.restart_worker()
         return True
 
+    def auto_game_enabled(self):
+        return bool(self.config.get("auto_mywhoosh", False))
+
+    def idle_status(self):
+        if self.auto_game_enabled():
+            if self.game_policy.override is False:
+                return "Arrêté — prochaine ouverture de MyWhoosh"
+            if self.game_policy.running is None:
+                return "Détection de MyWhoosh..."
+            if not self.game_policy.desired:
+                return "En attente de MyWhoosh"
+        return "Arrêté"
+
+    def sample_game(self):
+        try:
+            running = game_running()
+        except (OSError, AttributeError):
+            running = None
+        self.game_policy.observe(running)
+
+    def apply_game_policy(self):
+        if self.quitting or not self.auto_game_enabled():
+            return
+        if self.game_policy.desired:
+            if self.stopping:
+                self.restart = True
+            elif self.worker is None:
+                self.start()
+        else:
+            self.restart = False
+            if self.worker is not None:
+                self.stop_worker()
+            else:
+                self.status.set(self.idle_status())
+
+    def game_tick(self):
+        if self.quitting:
+            return
+        if self.auto_game_enabled():
+            self.sample_game()
+            self.apply_game_policy()
+        self.root.after(2000, self.game_tick)
+
     def reconnect(self):
-        if self.worker and self.worker.is_alive():
-            self.stop()
+        if self.auto_game_enabled():
+            self.game_policy.manual(True)
+        self.restart_worker()
+
+    def restart_worker(self):
+        if self.worker is not None:
+            self.stop_worker()
             self.restart = True
         else:
             self.start()
@@ -681,14 +744,15 @@ class App:
             self.root.iconify()
 
     def request_reset(self):
-        if self.worker and self.worker.is_alive():
+        if self.worker is not None and not self.stopping:
             self.reset_event.set()
         else:
-            self.start()
+            self.reconnect()
 
     def start(self):
-        if self.worker and self.worker.is_alive():
+        if self.quitting or self.worker is not None:
             return
+        self.stopping = False
         self.status.set("Recherche Bluetooth...")
         self.connected.clear()
         self.battery_values.clear()
@@ -738,21 +802,32 @@ class App:
         self.worker.start()
 
     def stop(self):
+        if self.auto_game_enabled():
+            self.game_policy.manual(False)
+        self.stop_worker()
+
+    def stop_worker(self):
         self.restart = False
+        if self.stopping:
+            return
+        if self.worker is None:
+            self.status.set(self.idle_status())
+            return
+        self.stopping = True
         self.reset_event.clear()
-        self.status.set("Arret en cours...")
+        self.status.set("Arrêt en cours...")
         loop, task = self.loop, self.task
         if loop and task:
             try:
                 loop.call_soon_threadsafe(task.cancel)
             except RuntimeError:
                 pass
-        elif not self.worker or not self.worker.is_alive():
-            self.status.set("Arrete")
-        else:
+        elif self.worker.is_alive():
             self.root.after(100, self.cancel_pending)
 
     def cancel_pending(self):
+        if not self.stopping:
+            return
         loop, task = self.loop, self.task
         if loop and task:
             try:
@@ -769,7 +844,7 @@ class App:
             messagebox.showinfo("Mise a jour", "Le telechargement est en cours. Attendre la fin avant de quitter.")
             return
         self.quitting = True
-        self.stop()
+        self.stop_worker()
         self.root.after(100, self.finish_quit)
 
     def finish_quit(self):
@@ -792,16 +867,21 @@ class App:
             elif event == "quit":
                 self.quit()
             elif event == "stopped":
-                self.status.set("Arrete")
+                self.worker = None
+                self.stopping = False
+                self.status.set(self.idle_status())
                 self.connected.clear()
-                self.refresh_tray()
                 for side in self.connections:
                     self.clear_battery(side)
-                    self.connections[side].set("Arrêtée")
+                    self.connections[side].set("En veille" if self.auto_game_enabled() and not self.game_policy.desired else "Arrêtée")
                     self.connection_labels[side].configure(foreground="#526478")
+                self.refresh_tray()
+                for label in self.button_labels.values():
+                    label.configure(bg="#e8eef4", fg="#153047")
                 if self.restart and not self.quitting:
                     self.restart = False
-                    self.root.after(150, self.start)
+                    if not self.auto_game_enabled() or self.game_policy.desired:
+                        self.start()
             elif event == "account_result":
                 action, error = value
                 self.auth_busy = False
@@ -929,7 +1009,8 @@ class App:
                     elif value.startswith(f"{side} | Connexion..."):
                         self.connections[side].set("Connexion...")
                         self.connection_labels[side].configure(foreground="#526478")
-                self.status.set(f"{len(self.connected)}/2 manettes connectées")
+                if not self.stopping and self.worker is not None:
+                    self.status.set(f"{len(self.connected)}/2 manettes connectées")
                 self.log_history.append(value)
                 if self.logs is not None and self.logs.winfo_exists():
                     self.logs.configure(state="normal")
@@ -956,7 +1037,9 @@ def main():
                 original(message)
                 app.events.put(("log", message))
             core.log = log
-            app.start()
+            if not app.auto_game_enabled():
+                app.start()
+            app.game_tick()
             if "--minimized" in sys.argv:
                 root.after(700, app.hide)
             root.mainloop()
