@@ -54,6 +54,52 @@ def autostart_enabled():
     except FileNotFoundError:
         return False
 
+def install_button_styles(root, style):
+    """Rounded nine-slice ttk backgrounds; keep native button focus and commands."""
+    from PIL import Image, ImageDraw, ImageTk
+
+    images = []
+    def background(fill, outline):
+        scale = 3
+        image = Image.new("RGBA", (32 * scale, 32 * scale))
+        draw = ImageDraw.Draw(image)
+        draw.rounded_rectangle((1 * scale, 1 * scale, 31 * scale - 1, 31 * scale - 1),
+                               radius=9 * scale, fill=fill, outline=outline, width=scale)
+        photo = ImageTk.PhotoImage(image.resize((32, 32), Image.Resampling.LANCZOS), master=root)
+        images.append(photo)
+        return photo
+
+    palettes = {
+        "TButton": ("#ffffff", "#cbd5e1", "#eaf1f7", "#dce7f0", "#153047", "#64748b"),
+        "Primary.TButton": ("#153047", "#153047", "#254b66", "#102437", "#ffffff", "#64748b"),
+        "Update.TButton": ("#16805d", "#16805d", "#117253", "#0d5e44", "#ffffff", "#64748b"),
+        "Danger.TButton": ("#fff7f7", "#e9c6c6", "#fce8e8", "#f8dada", "#a32929", "#64748b"),
+    }
+    for index, (name, colors) in enumerate(palettes.items()):
+        fill, border, hover, pressed, text, muted = colors
+        normal = background(fill, border)
+        active = background(hover, border)
+        down = background(pressed, border)
+        focus = background(fill, "#3b82f6")
+        active_focus = background(hover, "#3b82f6")
+        disabled = background("#e8edf2", "#dce3eb")
+        element = f"Rounded{index}.background"
+        style.element_create(element, "image", normal,
+                             ("disabled", disabled), ("pressed", down),
+                             ("active", "focus", active_focus),
+                             ("focus", focus), ("active", active),
+                             border=10, padding=0, sticky="nsew")
+        style.layout(name, [(element, {"sticky": "nsew", "children": [
+            ("Button.padding", {"sticky": "nsew", "children": [
+                ("Button.label", {"sticky": "nsew"})]})]})])
+        style.configure(name, foreground=text, font=("Segoe UI", 10, "bold"),
+                        padding=(12, 9) if name == "Primary.TButton" else (10, 7),
+                        anchor="center")
+        style.map(name, foreground=[("disabled", muted), ("!disabled", text)])
+    # Tk does not keep Python references to images used by style elements.
+    root._rounded_button_images = images
+
+
 class App:
     def __init__(self, root):
         self.root = root
@@ -102,9 +148,7 @@ class App:
         style.configure("AuthWarning.TLabel", background="#f1f5f9", foreground="#b91c1c", font=("Segoe UI", 10, "bold"))
         style.configure("Card.TLabel", background="#ffffff", foreground="#172c40")
         style.configure("Battery.TLabel", background="#ffffff", foreground="#172c40", font=("Segoe UI", 28, "bold"))
-        style.configure("Primary.TButton", background="#153047", foreground="#ffffff", padding=(12, 10), borderwidth=0)
-        style.map("Primary.TButton", background=[("active", "#254b66"), ("pressed", "#102437")])
-        style.configure("TButton", padding=(10, 7))
+        install_button_styles(root, style)
 
         frame = ttk.Frame(root, padding=20, style="Dashboard.TFrame")
         frame.pack(fill="both", expand=True)
@@ -167,9 +211,9 @@ class App:
         ttk.Button(controls, text="Diagnostics", command=self.open_diagnostics).pack(side="right")
         footer = ttk.Frame(frame, style="Dashboard.TFrame")
         footer.pack(fill="x", side="bottom", pady=(8,0))
-        ttk.Button(footer, text="Arreter", command=self.stop).pack(side="left")
+        ttk.Button(footer, text="Arreter", style="Danger.TButton", command=self.stop).pack(side="left")
         ttk.Button(footer, text="Quitter", command=self.quit).pack(side="right")
-        self.update_button = ttk.Button(frame, text="Mise a jour disponible", command=self.install_update)
+        self.update_button = ttk.Button(frame, text="Mise a jour disponible", style="Update.TButton", command=self.install_update)
         self.reset_label = tk.StringVar(value="Reboots : 0")
         self.setup_tray()
         self.root.after(100, self.poll)
@@ -367,7 +411,7 @@ class App:
         actions.pack(fill="x", pady=(14,0))
         signin = ttk.Button(actions, text="Se connecter", style="Primary.TButton", command=login)
         signin.pack(side="left")
-        signout = ttk.Button(actions, text="Deconnecter", command=logout)
+        signout = ttk.Button(actions, text="Deconnecter", style="Danger.TButton", command=logout)
         signout.pack(side="right")
         self.account_controls = [mail_entry, password_entry, remember_control, signin, signout]
         def close():
@@ -417,7 +461,7 @@ class App:
         actions = ttk.Frame(frame)
         actions.pack(fill="x", pady=8)
         ttk.Button(actions, text="Exporter le log", command=self.export_log).pack(side="left")
-        ttk.Button(actions, text="Reset gauche", command=self.request_reset).pack(side="left", padx=6)
+        ttk.Button(actions, text="Reset gauche", style="Danger.TButton", command=self.request_reset).pack(side="left", padx=6)
         ttk.Label(actions, textvariable=self.reset_label).pack(side="left")
         self.logs = tk.Text(frame, wrap="word", font=("Consolas", 9), height=12)
         scrollbar = ttk.Scrollbar(frame, command=self.logs.yview)
