@@ -9,6 +9,7 @@ from datetime import datetime
 from bleak import BleakScanner, BleakClient
 from instance_lock import single_instance, InstanceUnavailable
 from version import VERSION
+from zwift_auth import Session, AuthError, challenge_payload
 
 ZWIFT_ASYNC = "00000002-19ca-4651-86e5-fa29dcdd09d1"
 ZWIFT_SYNC_RX = "00000003-19ca-4651-86e5-fa29dcdd09d1"
@@ -259,7 +260,7 @@ async def left_session(device, config, battery_enabled, bridge=None, recovery=No
         await disconnect(client)
         log("GAUCHE | Deconnectee")
 
-async def dual_sessions(config, bridge, read_right=True, auto_reset=True, reset_after=45.0, refresh_handshake=False, fast_reconnect=False, reset_event=None):
+async def dual_sessions(config, bridge, read_right=True, auto_reset=True, reset_after=45.0, refresh_handshake=False, fast_reconnect=False, reset_event=None, auth_client=None, auth_reconnect=None):
     scan_lock = asyncio.Lock()
     ready = set()
 
@@ -281,6 +282,11 @@ async def dual_sessions(config, bridge, read_right=True, auto_reset=True, reset_
             last_frame = last_rx
             health = None
             challenges = 0
+            pending_challenge = None
+            active_challenge = None
+            solve_task = None
+            signed_sent_at = None
+            auth_confirmed = False
             state = 0
             counts = {"rx": 0, "decoded": 0, "sync": 0}
             def emit(current):
@@ -292,21 +298,32 @@ async def dual_sessions(config, bridge, read_right=True, auto_reset=True, reset_
                         bridge.button(button, pressed)
                 state = current
             def notify(sender, data):
-                nonlocal challenges, last_rx, last_frame
+                nonlocal challenges, last_rx, last_frame, pending_challenge, signed_sent_at, auth_confirmed
                 if not accepting_frames:
                     return
                 last_rx = time.monotonic()
                 counts["rx"] += 1
-                debug(f"{side} | RX ASYNC #{counts['rx']} | {bytes(data).hex(' ')}")
                 if bytes(data[:2]) == b"\xff\x03":
                     challenges += 1
                     log(f"{side} | Challenge authentification Zwift recu (FF 03)")
-                    if challenges == 2:
+                    payload = challenge_payload(data)
+                    if side == "GAUCHE" and auth_client is not None and auth_client.ready and payload:
+                        if payload != active_challenge:
+                            pending_challenge = payload
+                        signed_sent_at = None
+                        auth_confirmed = False
+                    elif challenges == 2:
                         log(f"{side} | AUTH | Renouvellement Zwift recommande")
+                else:
+                    debug(f"{side} | RX ASYNC #{counts['rx']} | {bytes(data).hex(' ')}")
                 current = decode_buttons(data)
                 if current is not None and accepting_frames:
                     counts["decoded"] += 1
                     last_frame = time.monotonic()
+                    if signed_sent_at is not None and not auth_confirmed:
+                        auth_confirmed = True
+                        challenges = 0
+                        log(f"{side} | AUTH_OK | Trame boutons recue apres reponse signee")
                     emit(current)
             def sync_notify(sender, data):
                 nonlocal last_rx
@@ -369,6 +386,33 @@ async def dual_sessions(config, bridge, read_right=True, auto_reset=True, reset_
                         if not client.is_connected:
                             break
                         now = time.monotonic()
+                        if side == "GAUCHE" and auth_reconnect is not None and auth_reconnect.is_set():
+                            auth_reconnect.clear()
+                            log(f"{side} | Reconnexion pour actualiser la session Zwift")
+                            break
+                        if solve_task is not None and solve_task.done():
+                            try:
+                                signed = solve_task.result()
+                                if pending_challenge is None and auth_client.ready:
+                                    await bounded(client.write_gatt_char(char, signed, response=response), 5)
+                                    signed_sent_at = time.monotonic()
+                                    log(f"{side} | AUTH_SENT | Reponse signee transmise")
+                            except AuthError as exc:
+                                log(f"{side} | AUTH | {exc}")
+                            except Exception:
+                                log(f"{side} | AUTH | Envoi de la reponse impossible")
+                            finally:
+                                solve_task = None
+                                active_challenge = None
+                        if pending_challenge is not None and solve_task is None:
+                            if auth_client is not None and auth_client.ready:
+                                active_challenge, pending_challenge = pending_challenge, None
+                                solve_task = asyncio.create_task(asyncio.to_thread(auth_client.solve, active_challenge))
+                            else:
+                                pending_challenge = None
+                        if signed_sent_at is not None and not auth_confirmed and now - signed_sent_at > 20:
+                            signed_sent_at = None
+                            log(f"{side} | AUTH | Reponse envoyee, aucune trame boutons recue")
                         # A lack of button frames alone is not proof of failure.
                         new_health = ("silent" if now-last_rx >= 20 else
                                       "suspect" if challenges >= 2 and now-last_frame >= 60 else "ok")
@@ -388,6 +432,7 @@ async def dual_sessions(config, bridge, read_right=True, auto_reset=True, reset_
                         manual = side == "GAUCHE" and reset_event is not None and reset_event.is_set()
                         automatic = (side == "GAUCHE" and auto_reset and not refresh_handshake
                                      and challenges >= 2 and now - connected_at >= reset_after
+                                     and not (auth_client is not None and auth_client.ready)
                                      and now >= next_reset_allowed)
                         if manual or automatic:
                             if manual:
@@ -422,6 +467,9 @@ async def dual_sessions(config, bridge, read_right=True, auto_reset=True, reset_
                     log(f"{side} | CACHE | echec, prochaine connexion sans cache")
             finally:
                 accepting_frames = False
+                if solve_task is not None:
+                    solve_task.cancel()
+                    await asyncio.gather(solve_task, return_exceptions=True)
                 if initialized and recovery_started is None:
                     recovery_started = time.monotonic()
                 emit(0)
@@ -449,7 +497,7 @@ async def dual_sessions(config, bridge, read_right=True, auto_reset=True, reset_
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
-async def main(argv=None, reset_event=None):
+async def main(argv=None, reset_event=None, auth_client=None, auth_reconnect=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--dual", action="store_true", help="Independent left and right BLE connections")
     parser.add_argument("--fast-reconnect", action="store_true", help="Experimental Windows GATT cache on dual-mode recovery")
@@ -500,7 +548,9 @@ async def main(argv=None, reset_event=None):
             bridge = Bridge(log, host=args.obc_host)
             await bridge.start()
         if args.dual:
-            await dual_sessions(config, bridge, not args.no_right_battery, not args.no_auto_reset, args.reset_after, args.refresh_handshake, args.fast_reconnect, reset_event)
+            if auth_client is None:
+                auth_client = Session()
+            await dual_sessions(config, bridge, not args.no_right_battery, not args.no_auto_reset, args.reset_after, args.refresh_handshake, args.fast_reconnect, reset_event, auth_client, auth_reconnect)
             return
         while True:
             try:
