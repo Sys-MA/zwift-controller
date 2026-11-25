@@ -31,6 +31,55 @@ def decode_heart_rate(data):
         return None
     return int.from_bytes(data[1:1+size], "little")
 
+async def observe_vendor(client, seconds):
+    """Observe only selected notify/read channels; no application commands."""
+    suffix = "-e56a-484c-b832-8b17cf6cbfe8"
+    allowed = ("abbafd01", "abbafd02", "abbafd04")
+    subscriptions = []
+    counts = {}
+    lengths = {}
+
+    def receive(sender, data):
+        name = sender.uuid[:8]
+        counts[name] = counts.get(name, 0) + 1
+        lengths.setdefault(name, set()).add(len(data))
+        # Unknown payloads may contain private information. Record metadata only.
+        if counts[name] <= 5:
+            log(f"  Notification {name}: {len(data)} bytes")
+
+    try:
+        for prefix in allowed:
+            char = client.services.get_characteristic(prefix + suffix)
+            if char is None:
+                log(f"{prefix}: absent")
+                continue
+            if "read" in char.properties:
+                try:
+                    data = await asyncio.wait_for(client.read_gatt_char(char), timeout=5)
+                    log(f"{prefix}: read succeeded, {len(data)} bytes (content omitted)")
+                except Exception as exc:
+                    log(f"{prefix}: read failed ({type(exc).__name__})")
+            if "notify" in char.properties or "indicate" in char.properties:
+                try:
+                    await asyncio.wait_for(client.start_notify(char, receive), timeout=5)
+                    subscriptions.append(char)
+                    log(f"{prefix}: subscribed")
+                except Exception as exc:
+                    log(f"{prefix}: subscription failed ({type(exc).__name__})")
+        if subscriptions:
+            log(f"Observing for {seconds} seconds; keep an exercise running on the watch.")
+            await asyncio.sleep(seconds)
+        for char in subscriptions:
+            name = char.uuid[:8]
+            log(f"{name}: {counts.get(name, 0)} notifications; packet sizes={sorted(lengths.get(name, set()))}")
+    finally:
+        for char in subscriptions:
+            if client.is_connected:
+                try:
+                    await asyncio.wait_for(client.stop_notify(char), timeout=5)
+                except Exception:
+                    pass
+
 async def run(args):
     LOG.write_text("", encoding="utf-8")
     log("Fitbit probe: " + ("scan + inspection" if args.address else "scan only"))
@@ -70,6 +119,9 @@ async def run(args):
                     if service.uuid.lower() == HEART_SERVICE and char.uuid.lower() == HEART_MEASUREMENT:
                         measurement = char
             log(f"Standard Heart Rate Service present: {heart_service_found}")
+            if args.observe_vendor:
+                await observe_vendor(client, args.observe_vendor)
+                return
             if measurement is None:
                 log("No standard heart rate measurement characteristic. Proprietary services will not be accessed.")
                 return
@@ -105,9 +157,13 @@ def main():
     parser.add_argument("--scan-seconds", type=int, default=20, choices=range(5, 61), metavar="5-60")
     parser.add_argument("--listen", type=int, default=0, choices=range(0, 121), metavar="0-120",
                         help="Optional standard HR notification test, seconds (requires --address)")
+    parser.add_argument("--observe-vendor", type=int, default=0, choices=range(0, 121), metavar="0-120",
+                        help="Explicitly read/subscribe to three observed Fitbit characteristics; log lengths only")
     args = parser.parse_args()
-    if args.listen and not args.address:
-        parser.error("--listen requires --address")
+    if (args.listen or args.observe_vendor) and not args.address:
+        parser.error("--listen and --observe-vendor require --address")
+    if args.listen and args.observe_vendor:
+        parser.error("Choose only one observation mode")
     try:
         asyncio.run(run(args))
     except KeyboardInterrupt:
