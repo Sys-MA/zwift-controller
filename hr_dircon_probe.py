@@ -141,7 +141,7 @@ async def run(ip, seconds):
             properties={
                 "serial-number": "HRTEST0001",
                 "mac-address": "02:00:00:00:18:0D",
-                "ble-service-uuids": "180D",
+                "ble-service-uuids": "0x180d",
             },
             server="hr-test-only.local.",
         )
