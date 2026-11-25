@@ -145,7 +145,8 @@ async def run(ip, seconds):
             },
             server="hr-test-only.local.",
         )
-        await asyncio.to_thread(zc.register_service, info)
+        # Wahoo's service label is 17 bytes, beyond the DNS-SD strict limit.
+        await asyncio.to_thread(zc.register_service, info, strict=False)
         registered = True
         print(f"Advertising {NAME} at {ip}:36866 for {seconds}s", flush=True)
         print("TEST ONLY: open MyWhoosh device pairing; do not start a ride.", flush=True)
