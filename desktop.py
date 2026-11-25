@@ -103,41 +103,133 @@ def install_button_styles(root, style):
     root._rounded_button_images = images
 
 
-def install_combobox_arrow(root, style):
-    """Replace the clam arrow button with an unframed chevron."""
-    from PIL import Image, ImageDraw, ImageTk
+class ModernSelect(tk.Frame):
+    """Flat readonly selector with a padded, keyboard-accessible popup."""
+    def __init__(self, parent, *, textvariable, values, width=30):
+        super().__init__(parent, bg="#ffffff", highlightthickness=1,
+                         highlightbackground="#cbd5e1", highlightcolor="#3b82f6",
+                         takefocus=True, cursor="hand2")
+        self.variable = textvariable
+        self.values = tuple(values)
+        self.popup = None
+        self.rows = []
+        self.index = 0
+        self.text = tk.Label(self, textvariable=textvariable, bg="#ffffff",
+                             fg="#153047", font=("Segoe UI", 10), anchor="w",
+                             width=width, padx=11, pady=8, cursor="hand2")
+        self.text.pack(side="left", fill="x", expand=True)
+        arrow = tk.Canvas(self, width=30, height=24, bg="#ffffff",
+                          highlightthickness=0, bd=0, cursor="hand2")
+        arrow.create_line(9, 9, 15, 15, 21, 9, fill="#526478", width=2,
+                          capstyle="round", joinstyle="round")
+        arrow.pack(side="right", padx=(0, 3))
+        for widget in (self, self.text, arrow):
+            widget.bind("<Button-1>", self.toggle)
+        for key in ("<Return>", "<space>", "<Down>", "<Alt-Down>"):
+            self.bind(key, self.toggle)
+        self.bind("<Up>", self.toggle)
+        self.bind("<Destroy>", self.on_destroy, add="+")
 
-    def chevron(color, surface):
-        scale = 3
-        width, height = 32, 24
-        image = Image.new("RGB", (width * scale, height * scale), surface)
-        draw = ImageDraw.Draw(image)
-        points = [(10 * scale, 9 * scale), (16 * scale, 15 * scale),
-                  (22 * scale, 9 * scale)]
-        draw.line(points, fill=color, width=2 * scale, joint="curve")
-        return ImageTk.PhotoImage(
-            image.resize((width, height), Image.Resampling.LANCZOS), master=root)
+    def toggle(self, event=None):
+        if self.popup is not None:
+            self.close()
+            return "break"
+        self.focus_set()
+        self.open()
+        return "break"
 
-    normal = chevron("#526478", "#ffffff")
-    active = chevron("#153047", "#ffffff")
-    disabled = chevron("#94a3b8", "#e8edf2")
-    style.element_create("ModernCombobox.downarrow", "image", normal,
-                         ("disabled", disabled), ("active", active), sticky="")
-    # Keep the native field and text elements, including keyboard accessibility,
-    # and retain the downarrow suffix used by the ttk mouse bindings.
-    def replace_arrow(layout):
-        result = []
-        for element, options in layout:
-            options = dict(options)
-            if element.rsplit(".", 1)[-1] == "downarrow":
-                element = "ModernCombobox.downarrow"
-            if "children" in options:
-                options["children"] = replace_arrow(options["children"])
-            result.append((element, options))
-        return result
+    def open(self):
+        owner = self.winfo_toplevel()
+        popup = tk.Toplevel(owner)
+        self.popup = popup
+        popup.withdraw()
+        popup.overrideredirect(True)
+        popup.transient(owner)
+        popup.configure(bg="#cbd5e1", padx=1, pady=1)
+        content = tk.Frame(popup, bg="#ffffff", padx=4, pady=4)
+        content.pack(fill="both", expand=True)
+        self.rows = []
+        self.index = self.values.index(self.variable.get()) if self.variable.get() in self.values else 0
+        for index, value in enumerate(self.values):
+            row = tk.Label(content, text=value, bg="#ffffff", fg="#153047",
+                           font=("Segoe UI", 10), anchor="w", padx=10, pady=8,
+                           cursor="hand2")
+            row.pack(fill="x")
+            row.bind("<Enter>", lambda event, i=index: self.highlight(i))
+            row.bind("<ButtonRelease-1>", lambda event, i=index: self.choose(i))
+            self.rows.append(row)
+        self.highlight(self.index)
+        popup.update_idletasks()
+        width = max(self.winfo_width(), popup.winfo_reqwidth())
+        height = popup.winfo_reqheight()
+        x = self.winfo_rootx()
+        y = self.winfo_rooty() + self.winfo_height() + 3
+        if y + height > self.winfo_vrooty() + self.winfo_vrootheight():
+            y = self.winfo_rooty() - height - 3
+        popup.geometry(f"{width}x{height}{x:+d}{y:+d}")
+        popup.bind("<Up>", lambda event: self.move(-1))
+        popup.bind("<Down>", lambda event: self.move(1))
+        popup.bind("<Home>", lambda event: self.highlight(0))
+        popup.bind("<End>", lambda event: self.highlight(len(self.values)-1))
+        popup.bind("<Return>", lambda event: self.choose(self.index))
+        popup.bind("<space>", lambda event: self.choose(self.index))
+        popup.bind("<Escape>", lambda event: self.close())
+        popup.bind("<Tab>", lambda event: self.close())
+        popup.bind("<ButtonPress-1>", self.outside_click)
+        popup.bind("<FocusOut>", lambda event: popup.after_idle(self.check_focus))
+        popup.deiconify()
+        popup.lift()
+        popup.grab_set()
+        popup.focus_set()
 
-    style.layout("TCombobox", replace_arrow(style.layout("TCombobox")))
-    root._combobox_arrow_images = (normal, active, disabled)
+    def highlight(self, index):
+        self.index = index
+        for i, row in enumerate(self.rows):
+            row.configure(bg="#e0eaf4" if i == index else "#ffffff")
+        return "break"
+
+    def move(self, direction):
+        return self.highlight((self.index + direction) % len(self.values))
+
+    def choose(self, index):
+        self.variable.set(self.values[index])
+        self.close()
+        self.event_generate("<<ComboboxSelected>>")
+        return "break"
+
+    def outside_click(self, event):
+        popup = self.popup
+        if popup is not None and not (
+                popup.winfo_rootx() <= event.x_root < popup.winfo_rootx() + popup.winfo_width()
+                and popup.winfo_rooty() <= event.y_root < popup.winfo_rooty() + popup.winfo_height()):
+            self.close()
+            return "break"
+
+    def check_focus(self):
+        if self.popup is not None:
+            try:
+                focus = self.popup.focus_get()
+                if focus is None or focus.winfo_toplevel() != self.popup:
+                    self.close(restore=False)
+            except tk.TclError:
+                self.close(restore=False)
+
+    def close(self, restore=True):
+        popup, self.popup = self.popup, None
+        if popup is not None:
+            try:
+                popup.grab_release()
+                popup.destroy()
+            except tk.TclError:
+                pass
+        self.rows = []
+        if restore and self.winfo_exists():
+            self.focus_set()
+        return "break"
+
+    def on_destroy(self, event):
+        if event.widget == self:
+            self.close(restore=False)
 
 
 class App:
@@ -196,36 +288,6 @@ class App:
                             bordercolor="#e8eef4", lightcolor=color, darkcolor=color, thickness=7, borderwidth=0)
         install_button_styles(root, style)
 
-        # Flat, white input controls matching the rounded action buttons.
-        style.configure("TCombobox", font=("Segoe UI", 10),
-                        padding=(12, 7), fieldbackground="#ffffff",
-                        background="#ffffff", foreground="#153047",
-                        bordercolor="#cbd5e1", lightcolor="#ffffff",
-                        darkcolor="#ffffff", arrowcolor="#526478",
-                        arrowsize=13, borderwidth=1, relief="flat",
-                        selectbackground="#ffffff", selectforeground="#153047")
-        style.map("TCombobox",
-                  fieldbackground=[("disabled", "#e8edf2"), ("readonly", "#ffffff")],
-                  background=[("disabled", "#e8edf2"), ("pressed", "#dce7f0"),
-                              ("active", "#eaf1f7"), ("readonly", "#ffffff")],
-                  foreground=[("disabled", "#64748b"), ("readonly", "#153047")],
-                  bordercolor=[("focus", "#3b82f6"), ("active", "#94a3b8")],
-                  lightcolor=[("readonly", "#ffffff")],
-                  darkcolor=[("readonly", "#ffffff")],
-                  selectbackground=[("readonly", "#ffffff")],
-                  selectforeground=[("readonly", "#153047")])
-        root.option_add("*TCombobox*Listbox.font", ("Segoe UI", 10))
-        root.option_add("*TCombobox*Listbox.background", "#ffffff")
-        root.option_add("*TCombobox*Listbox.foreground", "#153047")
-        root.option_add("*TCombobox*Listbox.selectBackground", "#e0eaf4")
-        root.option_add("*TCombobox*Listbox.selectForeground", "#153047")
-        root.option_add("*TCombobox*Listbox.borderWidth", 0)
-        root.option_add("*TCombobox*Listbox.highlightThickness", 0)
-        root.option_add("*TCombobox*Listbox.selectBorderWidth", 4)
-        root.option_add("*TCombobox*Listbox.activestyle", "none")
-        style.configure("ComboboxPopdownFrame", borderwidth=1, relief="flat",
-                        background="#cbd5e1")
-        install_combobox_arrow(root, style)
         style.configure("TEntry", padding=(9, 6), fieldbackground="#ffffff",
                         foreground="#153047", bordercolor="#cbd5e1",
                         lightcolor="#ffffff", darkcolor="#ffffff", borderwidth=1)
@@ -395,7 +457,7 @@ class App:
             ttk.Entry(frame, textvariable=key, width=9).grid(row=row, column=1, padx=8, sticky="ew")
             mode = tk.StringVar(value=self.config.get("keyboard_modes", {}).get(button, "Simple"))
             modes[button] = mode
-            ttk.Combobox(frame, textvariable=mode, values=("Simple","Maintenue","Repetition"), state="readonly", width=13).grid(row=row, column=2, padx=8)
+            ModernSelect(frame, textvariable=mode, values=("Simple","Maintenue","Repetition"), width=12).grid(row=row, column=2, padx=8)
             action = tk.StringVar()
             def refresh(*args, k=key, v=action):
                 value = k.get().strip().upper()
@@ -436,7 +498,7 @@ class App:
         diag = tk.BooleanVar(value=self.config.get("diagnostics", False))
         auto = tk.BooleanVar(value=autostart_enabled())
         ttk.Label(frame, text="Mode de sortie", font=("Segoe UI", 12, "bold")).pack(anchor="w")
-        ttk.Combobox(frame, textvariable=mode, state="readonly", values=("Clavier","OpenBikeControl","Bluetooth seulement"), width=30).pack(fill="x", pady=(4,12))
+        ModernSelect(frame, textvariable=mode, values=("Clavier","OpenBikeControl","Bluetooth seulement"), width=30).pack(fill="x", pady=(4,12))
         for title, var in (("Demarrer avec Windows", auto), ("Reconnexion rapide (cache GATT Windows)", fast), ("Redemarrage de secours (gauche)", auto_reset), ("Logs de diagnostic detailles", diag)):
             ttk.Checkbutton(frame, text=title, variable=var).pack(anchor="w", pady=4)
         def save():
