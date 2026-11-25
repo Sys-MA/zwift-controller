@@ -12,7 +12,10 @@ import threading
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import shutil
-import ctypes
+import webbrowser
+from instance_lock import single_instance, InstanceUnavailable
+from version import VERSION
+import updater
 from bike_icon import make_icon
 
 import zwift_controller as core
@@ -64,10 +67,14 @@ class App:
         self.reset_count = 0
         self.config = core.load_config()
         self.log_history = deque(maxlen=500)
+        self.update_release = None
+        self.update_busy = False
+        self.battery_values = {}
+        self.low_battery_warned = set()
         self.logs = None
         self.dialogs = {}
         self.button_labels = {}
-        root.title("Zwift Controller 0.7.2")
+        root.title("Zwift Controller " + VERSION)
         from PIL import ImageTk
         self.window_icon = ImageTk.PhotoImage(make_icon(64))
         root.iconphoto(True, self.window_icon)
@@ -100,7 +107,7 @@ class App:
         ttk.Label(titles, text="Zwift Controller", style="Dashboard.TLabel", font=("Segoe UI", 20, "bold")).pack(anchor="w")
         self.status = tk.StringVar(value="En attente")
         ttk.Label(titles, textvariable=self.status, style="Muted.TLabel").pack(anchor="w")
-        ttk.Label(header, text="0.7.2", style="Muted.TLabel").pack(side="right", anchor="n")
+        ttk.Label(header, text=VERSION, style="Muted.TLabel").pack(side="right", anchor="n")
 
         batteries = ttk.Frame(frame, style="Dashboard.TFrame")
         batteries.pack(fill="x", pady=(18, 12))
@@ -156,9 +163,52 @@ class App:
         footer.pack(fill="x", side="bottom", pady=(8,0))
         ttk.Button(footer, text="Arreter", command=self.stop).pack(side="left")
         ttk.Button(footer, text="Quitter", command=self.quit).pack(side="right")
+        self.update_button = ttk.Button(frame, text="Mise a jour disponible", command=self.install_update)
         self.reset_label = tk.StringVar(value="Reboots : 0")
         self.setup_tray()
         self.root.after(100, self.poll)
+        self.root.after(1500, self.check_update)
+
+    def notify(self, title, message):
+        if self.tray:
+            try:
+                self.tray.notify(message, title)
+            except Exception:
+                pass
+
+    def refresh_tray(self):
+        if self.tray:
+            levels = [("G" if side == "GAUCHE" else "D") + ": " + (str(self.battery_values[side]) + "%" if side in self.connected and side in self.battery_values else "--") for side in self.connections]
+            self.tray.title = "Zwift Controller | " + " | ".join(levels)
+
+    def check_update(self, manual=False):
+        if self.update_busy or self.quitting:
+            return
+        self.update_busy = True
+        def run():
+            try:
+                self.events.put(("update_checked", (updater.check(), manual)))
+            except Exception as exc:
+                self.events.put(("update_error", (str(exc), manual)))
+        threading.Thread(target=run, daemon=True).start()
+
+    def install_update(self):
+        if self.update_busy or not self.update_release:
+            return
+        release = self.update_release
+        if not getattr(sys, "frozen", False) or not release["installable"]:
+            webbrowser.open(updater.RELEASES)
+            return
+        if not messagebox.askyesno("Mise a jour", f"Installer {release['version']}? Les manettes seront deconnectees pendant le redemarrage."):
+            return
+        self.update_busy = True
+        self.update_button.configure(state="disabled", text="Telechargement...")
+        def run():
+            try:
+                self.events.put(("update_staged", updater.stage(release)))
+            except Exception as exc:
+                self.events.put(("update_error", (str(exc), True)))
+        threading.Thread(target=run, daemon=True).start()
 
     def dialog(self, name, title):
         existing = self.dialogs.get(name)
@@ -246,6 +296,7 @@ class App:
                 return
             if self.save_settings({"output_mode":mode.get(),"auto_reset":auto_reset.get(),"fast_reconnect":fast.get(),"diagnostics":diag.get()}, win):
                 win.destroy()
+        ttk.Button(frame, text="Verifier les mises a jour", command=lambda: self.check_update(True)).pack(anchor="w", pady=(14,0))
         ttk.Button(frame, text="Enregistrer", style="Primary.TButton", command=save).pack(anchor="e", pady=(14,0))
 
     def open_diagnostics(self):
@@ -337,6 +388,8 @@ class App:
             return
         self.status.set("Recherche Bluetooth...")
         self.connected.clear()
+        self.battery_values.clear()
+        self.refresh_tray()
         self.reset_event.clear()
         self.auth.set("")
         self.auth_warning.pack_forget()
@@ -431,12 +484,45 @@ class App:
             elif event == "stopped":
                 self.status.set("Arrete")
                 self.connected.clear()
+                self.refresh_tray()
                 for side in self.connections:
                     self.connections[side].set("Arretee")
                     self.connection_labels[side].configure(foreground="#526478")
                 if self.restart and not self.quitting:
                     self.restart = False
                     self.root.after(150, self.start)
+            elif event == "update_checked":
+                release, manual = value
+                self.update_busy = False
+                self.update_release = release
+                if release:
+                    self.update_button.configure(text=f"Mise a jour disponible : {release['version']}", state="normal")
+                    if not self.update_button.winfo_manager():
+                        self.update_button.pack(fill="x", pady=(8,0), before=self.game_label)
+                else:
+                    self.update_button.pack_forget()
+                    if manual:
+                        messagebox.showinfo("Mises a jour", "Aucune nouvelle version stable accessible.")
+            elif event == "update_error":
+                error, manual = value
+                self.update_busy = False
+                if self.update_release:
+                    self.update_button.configure(text=f"Mise a jour disponible : {self.update_release['version']}", state="normal")
+                if manual:
+                    messagebox.showerror("Mises a jour", error)
+                else:
+                    self.log_history.append("UPDATE | " + error)
+            elif event == "update_staged":
+                self.update_busy = False
+                staged, expected = value
+                try:
+                    updater.launch_installer(staged, expected)
+                except Exception as exc:
+                    staged.unlink(missing_ok=True)
+                    self.update_button.configure(state="normal", text="Reessayer la mise a jour")
+                    messagebox.showerror("Mise a jour", str(exc))
+                else:
+                    self.quit()
             elif event == "log":
                 if value.startswith("GAUCHE | RESET |"):
                     self.reset_count += 1
@@ -444,7 +530,16 @@ class App:
                 match = re.search(r"(GAUCHE|DROITE) \| Batterie : (\d+)%", value)
                 if match:
                     self.levels[match[1]].set(f"{match[2]} %")
-                    self.battery_bars[match[1]]["value"] = int(match[2])
+                    level = int(match[2])
+                    side = match[1]
+                    self.battery_bars[side]["value"] = level
+                    self.battery_values[side] = level
+                    self.refresh_tray()
+                    if level < 15 and side not in self.low_battery_warned:
+                        self.low_battery_warned.add(side)
+                        self.notify("Batterie faible", f"Manette {side.lower()} : {level}%")
+                    elif level >= 15:
+                        self.low_battery_warned.discard(side)
                 button = re.match(r"(GAUCHE|DROITE) \| (\w+) \| (ENFONCE|RELACHE) \|", value)
                 if button and button[2] in self.button_labels:
                     pressed = button[3] == "ENFONCE"
@@ -476,12 +571,18 @@ class App:
                 for side in self.connections:
                     if value.startswith(f"{side} | Initialisation terminee"):
                         self.connected.add(side)
+                        self.refresh_tray()
                         self.connections[side].set("Connectee")
                         self.connection_labels[side].configure(foreground="#16805d")
                     elif value.startswith(f"{side} | Deconnectee"):
                         self.connected.discard(side)
+                        self.refresh_tray()
                         self.connections[side].set("Reconnexion...")
                         self.connection_labels[side].configure(foreground="#a15c12")
+                    elif value.startswith(f"{side} | HEALTH | ") and side in self.connected:
+                        health = value.rsplit(" | ",1)[-1]
+                        self.connections[side].set({"ok":"Connectee", "silent":"Connectee, sans donnees", "suspect":"Communication a verifier"}.get(health,"Connectee"))
+                        self.connection_labels[side].configure(foreground="#16805d" if health == "ok" else "#a15c12")
                     elif value.startswith(f"{side} | Connexion..."):
                         self.connections[side].set("Connexion...")
                         self.connection_labels[side].configure(foreground="#526478")
@@ -498,27 +599,23 @@ class App:
             self.root.after(100, self.poll)
 
 def main():
-    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p]
-    kernel.CreateMutexW.restype = ctypes.c_void_p
-    mutex = kernel.CreateMutexW(None, False, "Local\\ZwiftControllerDesktop")
-    already_running = ctypes.get_last_error() == 183
     root = tk.Tk()
-    if not mutex or already_running:
+    try:
+        with single_instance():
+            app = App(root)
+            original = core.log
+            def log(message):
+                original(message)
+                app.events.put(("log", message))
+            core.log = log
+            app.start()
+            if "--minimized" in sys.argv:
+                root.after(700, app.hide)
+            root.mainloop()
+    except InstanceUnavailable as exc:
         root.withdraw()
-        messagebox.showinfo("Zwift Controller", "Une instance est deja ouverte ou le verrou Windows est indisponible.")
+        messagebox.showinfo("Zwift Controller", str(exc))
         root.destroy()
-        return
-    app = App(root)
-    original = core.log
-    def log(message):
-        original(message)
-        app.events.put(("log", message))
-    core.log = log
-    app.start()
-    if "--minimized" in sys.argv:
-        root.after(700, app.hide)
-    root.mainloop()
 
 if __name__ == "__main__":
     main()
