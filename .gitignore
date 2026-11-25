@@ -9,3 +9,8 @@ dist/
 debug.log
 
 fitbit-probe.log
+
+# Local Google OAuth credentials and diagnostic data
+google-health-client.json
+client_secret*.json
+google-health-probe.log
