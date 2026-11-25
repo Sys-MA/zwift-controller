@@ -69,6 +69,7 @@ class App:
         self.log_history = deque(maxlen=500)
         self.update_release = None
         self.update_busy = False
+        self.update_downloading = False
         self.battery_values = {}
         self.low_battery_warned = set()
         self.logs = None
@@ -164,7 +165,7 @@ class App:
         self.reset_label = tk.StringVar(value="Reboots : 0")
         self.setup_tray()
         self.root.after(100, self.poll)
-        self.root.after(1500, self.check_update)
+        self.root.after(1500, self.periodic_update_check)
 
     def notify(self, title, message):
         if self.tray:
@@ -177,6 +178,11 @@ class App:
         if self.tray:
             levels = [("G" if side == "GAUCHE" else "D") + ": " + (str(self.battery_values[side]) + "%" if side in self.connected and side in self.battery_values else "--") for side in self.connections]
             self.tray.title = "Zwift Controller | " + " | ".join(levels)
+
+    def periodic_update_check(self):
+        if not self.quitting:
+            self.check_update()
+            self.root.after(6 * 60 * 60 * 1000, self.periodic_update_check)
 
     def check_update(self, manual=False):
         if self.update_busy or self.quitting:
@@ -199,6 +205,7 @@ class App:
         if not messagebox.askyesno("Mise a jour", f"Installer {release['version']}? Les manettes seront deconnectees pendant le redemarrage."):
             return
         self.update_busy = True
+        self.update_downloading = True
         self.update_button.configure(state="disabled", text="Telechargement...")
         def run():
             try:
@@ -457,6 +464,11 @@ class App:
             self.root.after(100, self.cancel_pending)
 
     def quit(self):
+        if self.quitting:
+            return
+        if self.update_downloading:
+            messagebox.showinfo("Mise a jour", "Le telechargement est en cours. Attendre la fin avant de quitter.")
+            return
         self.quitting = True
         self.stop()
         self.root.after(100, self.finish_quit)
@@ -493,8 +505,12 @@ class App:
             elif event == "update_checked":
                 release, manual = value
                 self.update_busy = False
+                previous = self.update_release
                 self.update_release = release
                 if release:
+                    if not previous or previous["version"] != release["version"]:
+                        self.log_history.append(f"UPDATE | Version {release['version']} disponible")
+                        self.notify("Mise a jour disponible", f"Zwift Controller {release['version']}")
                     self.update_button.configure(text=f"Mise a jour disponible : {release['version']}", state="normal")
                     if not self.update_button.winfo_manager():
                         self.update_button.pack(fill="x", pady=(8,0), before=self.configure_button)
@@ -505,17 +521,19 @@ class App:
             elif event == "update_error":
                 error, manual = value
                 self.update_busy = False
+                self.update_downloading = False
+                self.log_history.append("UPDATE | " + error)
                 if self.update_release:
                     self.update_button.configure(text=f"Mise a jour disponible : {self.update_release['version']}", state="normal")
                 if manual:
                     messagebox.showerror("Mises a jour", error)
-                else:
-                    self.log_history.append("UPDATE | " + error)
             elif event == "update_staged":
                 self.update_busy = False
+                self.update_downloading = False
                 staged, expected = value
                 try:
                     updater.launch_installer(staged, expected)
+                    self.log_history.append("UPDATE | Installation lancee apres fermeture")
                 except Exception as exc:
                     staged.unlink(missing_ok=True)
                     self.update_button.configure(state="normal", text="Reessayer la mise a jour")
