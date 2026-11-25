@@ -459,7 +459,7 @@ async def main(argv=None, reset_event=None):
     config = load_config()
     if config["left"].upper() == config["right"].upper() or config["battery_interval"] < 60:
         raise ValueError("Configuration invalide")
-    print("MyWhoosh Controller - v0.7.1")
+    print("MyWhoosh Controller - v0.7.2")
     print("Mode dual : deux connexions." if args.dual else "Connexion principale gauche. CTRL+C pour quitter.")
     if not CONFIG.exists():
         CONFIG.write_text(json.dumps(config, indent=2), encoding="utf-8")
