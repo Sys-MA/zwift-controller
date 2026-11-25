@@ -25,6 +25,41 @@ def log(message):
     with LOG.open("a", encoding="utf-8") as out:
         out.write(line + "\n")
 
+def describe_client_hello(record):
+    """Parse only public DTLS ClientHello negotiation fields, not identities."""
+    if len(record) < 25 or record[0] != 22 or record[3:5] != b"\x00\x00":
+        return None
+    record_len = int.from_bytes(record[11:13], "big")
+    if record_len > len(record) - 13 or record[13] != 1:
+        return None
+    handshake = record[13:13+record_len]
+    total = int.from_bytes(handshake[1:4], "big")
+    offset = int.from_bytes(handshake[6:9], "big")
+    fragment = int.from_bytes(handshake[9:12], "big")
+    if offset or total != fragment or len(handshake) < 12 + total:
+        return "ClientHello fragmented; not decoded"
+    body = handshake[12:12+total]
+    try:
+        if len(body) < 35:
+            raise ValueError
+        version = body[:2].hex()
+        p = 34
+        # Skip random, session ID and cookie without logging their contents.
+        for _ in range(2):
+            n = body[p]
+            p += 1 + n
+        length = int.from_bytes(body[p:p+2], "big")
+        p += 2
+        if not length or length % 2 or p + length > len(body):
+            raise ValueError
+        suites = [int.from_bytes(body[i:i+2], "big") for i in range(p, p+length, 2)]
+        names = {0xc0a4: "PSK AES-128-CCM", 0xc0a8: "PSK AES-128-CCM-8",
+                 0x00a8: "PSK AES-128-GCM", 0x008c: "PSK AES-128-CBC-SHA",
+                 0x00ae: "PSK AES-128-CBC-SHA256"}
+        return "ClientHello version=" + version + " suites=" + ", ".join(f"{x:04X} ({names.get(x, 'other')})" for x in suites)
+    except (ValueError, IndexError):
+        return "ClientHello malformed or incomplete"
+
 def describe_frame(frame):
     """Report only structural metadata, never payload or network addresses."""
     if len(frame) < 4:
@@ -40,6 +75,16 @@ def describe_frame(frame):
     else:
         description = "Unknown network framing"
     candidates = []
+    if not (frame[0] & 0x80) and frame[0] >> 4 == 4 and len(frame) >= 20 and frame[9] == 17:
+        ihl = (frame[0] & 15) * 4
+        if ihl >= 20 and len(frame) >= ihl + 8 and declared == len(frame):
+            udp = frame[ihl:]
+            udp_len = int.from_bytes(udp[4:6], "big")
+            if 8 <= udp_len <= len(udp):
+                description += f"; UDP src_port={int.from_bytes(udp[:2], 'big')} dst_port={int.from_bytes(udp[2:4], 'big')}"
+                hello = describe_client_hello(udp[8:udp_len])
+                if hello:
+                    description += "; " + hello
     for i in range(min(64, max(0, len(frame)-12))):
         if frame[i] in (20, 21, 22, 23) and frame[i+1:i+3] in (b"\xfe\xff", b"\xfe\xfd", b"\xfe\xfc"):
             length = int.from_bytes(frame[i+11:i+13], "big")
