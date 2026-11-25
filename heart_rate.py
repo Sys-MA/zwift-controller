@@ -37,13 +37,49 @@ class HeartRateWindow:
         self.devices = []
         self.closed = False
         self.last_read = None
-        self.bpm = tk.StringVar(value="— BPM")
+        self.bpm = tk.StringVar(value="—")
         self.status = tk.StringVar(value="Choisir un capteur Bluetooth BLE")
         self.frame = ttk.Frame(self.window, padding=12)
         self.frame.pack(fill="both", expand=True)
-        ttk.Label(self.frame, textvariable=self.bpm,
-                  font=("Segoe UI", 28, "bold")).pack()
-        ttk.Label(self.frame, textvariable=self.status, wraplength=280).pack(pady=(0, 8))
+        self.card = tk.Frame(self.frame, bg="#192331", padx=12, pady=8)
+        self.card.pack(fill="x", pady=(0, 8))
+        self.card_top = tk.Frame(self.card, bg="#192331")
+        self.card_top.pack(fill="x")
+        self.caption = tk.Label(self.card_top, text="CARDIO", bg="#192331",
+                                fg="#aeb9c9", font=("Segoe UI", 9, "bold"))
+        self.caption.pack(side="left")
+        self.close_label = tk.Label(self.card_top, text="×", bg="#192331",
+                                    fg="#aeb9c9", cursor="hand2", font=("Segoe UI", 13))
+        self.close_label.pack(side="right")
+        self.close_label.bind("<Button-1>", lambda event: self.close())
+        self.expand_label = tk.Label(self.card_top, text="⚙", bg="#192331",
+                                     fg="#aeb9c9", cursor="hand2", font=("Segoe UI", 12))
+        self.expand_label.pack(side="right", padx=(0, 8))
+        self.expand_label.bind("<Button-1>", self.expand)
+        self.reading = tk.Frame(self.card, bg="#192331")
+        self.reading.pack(anchor="center", pady=(0, 2))
+        self.heart = tk.Canvas(self.reading, width=34, height=34, bg="#192331",
+                               highlightthickness=0)
+        self.heart.create_polygon(17, 29, 4, 16, 3, 10, 6, 5, 12, 4, 17, 9,
+                                  22, 4, 28, 5, 31, 10, 30, 16,
+                                  fill="#f87171", outline="", smooth=True)
+        self.heart.create_line(6, 17, 12, 17, 15, 11, 19, 22, 22, 17, 28, 17,
+                               fill="#192331", width=2, joinstyle="round")
+        self.heart.pack(side="left", padx=(0, 7))
+        self.digits = tk.Label(self.reading, textvariable=self.bpm, bg="#192331",
+                               fg="#ffffff", font=("Segoe UI", 32, "bold"), width=3)
+        self.digits.pack(side="left")
+        self.unit = tk.Label(self.reading, text="BPM", bg="#192331",
+                             fg="#aeb9c9", font=("Segoe UI", 10))
+        self.unit.pack(side="left", anchor="s", pady=(0, 10))
+        self.card_status = tk.Label(self.card, textvariable=self.status, bg="#192331",
+                                    fg="#aeb9c9", wraplength=240, font=("Segoe UI", 9))
+        self.card_status.pack()
+        for widget in (self.card, self.card_top, self.caption, self.reading,
+                       self.heart, self.digits, self.unit, self.card_status):
+            widget.bind("<ButtonPress-1>", self.begin_drag)
+            widget.bind("<B1-Motion>", self.drag)
+        self.window.bind("<Escape>", self.expand)
         self.controls = ttk.Frame(self.frame)
         self.controls.pack(fill="x")
         self.selection = ttk.Combobox(self.controls, state="readonly", width=32)
@@ -64,15 +100,48 @@ class HeartRateWindow:
         self.legacy_button = ttk.Button(self.legacy, text="Connecter HRM2", command=self.connect_legacy)
         self.legacy_button.pack(anchor="w")
         self.compact = tk.BooleanVar(value=False)
-        ttk.Checkbutton(self.frame, text="Affichage compact", variable=self.compact,
-                        command=self.toggle_compact).pack(anchor="w", pady=(8, 0))
+        self.compact_button = ttk.Checkbutton(self.frame, text="Affichage compact", variable=self.compact,
+                        command=self.toggle_compact)
+        self.compact_button.pack(anchor="w", pady=(8, 0))
+        self.expand_label.pack_forget()
         self.window.after(150, self.poll)
+
+    def begin_drag(self, event):
+        self.drag_offset = (event.x_root - self.window.winfo_x(),
+                            event.y_root - self.window.winfo_y())
+
+    def drag(self, event):
+        if not self.compact.get():
+            return
+        x = event.x_root - self.drag_offset[0]
+        y = event.y_root - self.drag_offset[1]
+        self.window.geometry(f"{x:+d}{y:+d}")
+
+    def expand(self, event=None):
+        if self.compact.get():
+            self.compact.set(False)
+            self.toggle_compact()
 
     def toggle_compact(self):
         if self.compact.get():
             self.controls.pack_forget()
+            self.compact_button.pack_forget()
+            self.frame.configure(padding=0)
+            self.card.pack_configure(pady=0)
+            self.expand_label.pack(side="right", padx=(0, 8))
+            self.window.overrideredirect(True)
+            self.window.attributes("-alpha", 0.90)
         else:
-            self.controls.pack(fill="x", before=self.frame.winfo_children()[-1])
+            self.window.overrideredirect(False)
+            self.window.attributes("-alpha", 1.0)
+            self.frame.configure(padding=12)
+            self.card.pack_configure(pady=(0, 8))
+            self.expand_label.pack_forget()
+            self.controls.pack(fill="x")
+            self.compact_button.pack(anchor="w", pady=(8, 0))
+        self.window.attributes("-topmost", True)
+        self.window.update_idletasks()
+        self.window.geometry("")
 
     def launch(self, operation):
         if self.closed or self.worker is not None:
@@ -83,7 +152,7 @@ class HeartRateWindow:
         self.connect_button.configure(state="disabled")
         self.stop_button.configure(state="normal")
         self.last_read = None
-        self.bpm.set("— BPM")
+        self.bpm.set("—")
 
         def work():
             try:
@@ -154,7 +223,7 @@ class HeartRateWindow:
     def stop(self):
         self.cancel.set()
         self.last_read = None
-        self.bpm.set("— BPM")
+        self.bpm.set("—")
         self.status.set("Arrêt en cours…")
         self.stop_button.configure(state="disabled")
 
@@ -182,12 +251,12 @@ class HeartRateWindow:
             elif kind == "bpm" and not self.cancel.is_set():
                 bpm, stamp = value
                 self.last_read = stamp if bpm is not None else None
-                self.bpm.set(f"{bpm} BPM" if bpm is not None else "— BPM")
+                self.bpm.set(str(bpm) if bpm is not None else "—")
                 self.status.set("Signal reçu" if bpm is not None else "Mesure indisponible")
             elif kind == "done":
                 self.worker = None
                 self.last_read = None
-                self.bpm.set("— BPM")
+                self.bpm.set("—")
                 if self.cancel.is_set():
                     self.status.set("Arrêté")
                 self.legacy_button.configure(state="normal")
@@ -196,6 +265,6 @@ class HeartRateWindow:
                 self.stop_button.configure(state="disabled")
         if self.last_read is not None and time.monotonic() - self.last_read > 5:
             self.last_read = None
-            self.bpm.set("— BPM")
+            self.bpm.set("—")
             self.status.set("Aucune donnée récente")
         self.window.after(150, self.poll)
