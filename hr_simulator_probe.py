@@ -47,6 +47,25 @@ async def run(seconds):
         return
     measurement = result.characteristic
 
+    # Optional standard HRS Body Sensor Location: chest (1).
+    location_params = GattLocalCharacteristicParameters()
+    location_params.characteristic_properties = GattCharacteristicProperties.READ
+    location_params.read_protection_level = GattProtectionLevel.PLAIN
+    writer = DataWriter()
+    try:
+        writer.write_byte(1)
+        location_params.static_value = writer.detach_buffer()
+        location_result = await provider.service.create_characteristic_async(
+            UUID("00002a38-0000-1000-8000-00805f9b34fb"), location_params
+        )
+    finally:
+        writer.close()
+    if location_result.error != BluetoothError.SUCCESS:
+        print("Body Sensor Location creation failed:", location_result.error)
+        return
+    location = location_result.characteristic
+    print("Heart Rate Measurement (2A37) + Body Sensor Location (2A38) ready.")
+
     advertising = GattServiceProviderAdvertisingParameters()
     advertising.is_discoverable = True
     advertising.is_connectable = True
