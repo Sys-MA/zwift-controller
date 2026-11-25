@@ -1,6 +1,9 @@
 """Optional local-only heart rate display. No relay, storage or background startup."""
 import asyncio
 import queue
+import re
+import subprocess
+import sys
 import threading
 import time
 import tkinter as tk
@@ -97,6 +100,8 @@ class HeartRateWindow:
         ttk.Label(self.legacy, text="Sports Tracker HRM2 (Bluetooth classique)").pack(anchor="w")
         self.address = ttk.Entry(self.legacy, width=24)
         self.address.pack(fill="x", pady=(4, 4))
+        self.detect_button = ttk.Button(self.legacy, text="Détecter HRM2", command=self.detect_legacy)
+        self.detect_button.pack(anchor="w", pady=(0, 4))
         self.legacy_button = ttk.Button(self.legacy, text="Connecter HRM2", command=self.connect_legacy)
         self.legacy_button.pack(anchor="w")
         self.compact = tk.BooleanVar(value=False)
@@ -105,6 +110,7 @@ class HeartRateWindow:
         self.compact_button.pack(anchor="w", pady=(8, 0))
         self.expand_label.pack_forget()
         self.window.after(150, self.poll)
+        self.window.after(250, self.detect_legacy)
 
     def begin_drag(self, event):
         self.drag_offset = (event.x_root - self.window.winfo_x(),
@@ -147,6 +153,7 @@ class HeartRateWindow:
         if self.closed or self.worker is not None:
             return
         self.cancel.clear()
+        self.detect_button.configure(state="disabled")
         self.legacy_button.configure(state="disabled")
         self.scan_button.configure(state="disabled")
         self.connect_button.configure(state="disabled")
@@ -208,6 +215,37 @@ class HeartRateWindow:
 
         self.launch(operation)
 
+    def detect_legacy(self):
+        if self.closed or self.worker is not None or sys.platform != "win32":
+            return
+        self.status.set("Recherche des HRM2 jumelées…")
+
+        async def operation():
+            command = (
+                "Get-PnpDevice -Class Bluetooth -PresentOnly | "
+                "Where-Object { $_.FriendlyName -like '*HRM2*' } | "
+                "Select-Object -ExpandProperty InstanceId"
+            )
+            result = await asyncio.to_thread(
+                subprocess.run,
+                ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
+                capture_output=True, text=True, errors="replace", timeout=15,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            if self.cancel.is_set():
+                return
+            if result.returncode != 0:
+                self.events.put(("status", "Détection HRM2 impossible — saisir l’adresse manuellement"))
+                return
+            addresses = sorted(set(re.findall(
+                r"BTHENUM\\DEV_([0-9A-F]{12})(?:\\|$)", result.stdout, re.I | re.M
+            )))
+            formatted = [":".join(x[i:i+2] for i in range(0, 12, 2)).upper()
+                         for x in addresses]
+            self.events.put(("legacy_addresses", formatted))
+
+        self.launch(operation)
+
     def connect_legacy(self):
         from hr_legacy import read_hrm2
         address = self.address.get()
@@ -242,6 +280,16 @@ class HeartRateWindow:
                 break
             if kind == "status":
                 self.status.set(value)
+            elif kind == "legacy_addresses" and not self.cancel.is_set():
+                if len(value) == 1:
+                    if not self.address.get().strip():
+                        self.address.delete(0, "end")
+                        self.address.insert(0, value[0])
+                    self.status.set("HRM2 détectée — prête à connecter")
+                elif value:
+                    self.status.set("Plusieurs HRM2 : " + ", ".join(value))
+                else:
+                    self.status.set("Aucune HRM2 jumelée — adresse manuelle possible")
             elif kind == "devices":
                 self.devices = value
                 self.selection.configure(values=[f"{name} ({dev.address})" for dev, name in value])
@@ -259,6 +307,7 @@ class HeartRateWindow:
                 self.bpm.set("—")
                 if self.cancel.is_set():
                     self.status.set("Arrêté")
+                self.detect_button.configure(state="normal")
                 self.legacy_button.configure(state="normal")
                 self.scan_button.configure(state="normal")
                 self.connect_button.configure(state="normal" if self.devices else "disabled")
