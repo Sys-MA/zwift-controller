@@ -56,6 +56,13 @@ class HeartRateWindow:
         self.connect_button.pack(side="left", padx=4)
         self.stop_button = ttk.Button(buttons, text="Arrêter", command=self.stop, state="disabled")
         self.stop_button.pack(side="left")
+        self.legacy = ttk.Frame(self.controls)
+        self.legacy.pack(fill="x", pady=(8, 0))
+        ttk.Label(self.legacy, text="Sports Tracker HRM2 (Bluetooth classique)").pack(anchor="w")
+        self.address = ttk.Entry(self.legacy, width=24)
+        self.address.pack(fill="x", pady=(4, 4))
+        self.legacy_button = ttk.Button(self.legacy, text="Connecter HRM2", command=self.connect_legacy)
+        self.legacy_button.pack(anchor="w")
         self.compact = tk.BooleanVar(value=False)
         ttk.Checkbutton(self.frame, text="Affichage compact", variable=self.compact,
                         command=self.toggle_compact).pack(anchor="w", pady=(8, 0))
@@ -71,6 +78,7 @@ class HeartRateWindow:
         if self.closed or self.worker is not None:
             return
         self.cancel.clear()
+        self.legacy_button.configure(state="disabled")
         self.scan_button.configure(state="disabled")
         self.connect_button.configure(state="disabled")
         self.stop_button.configure(state="normal")
@@ -131,6 +139,18 @@ class HeartRateWindow:
 
         self.launch(operation)
 
+    def connect_legacy(self):
+        from hr_legacy import read_hrm2
+        address = self.address.get()
+        self.status.set("Connexion HRM2…")
+
+        async def operation():
+            await asyncio.to_thread(read_hrm2, address, self.cancel,
+                lambda bpm, stamp: self.events.put(("bpm", (bpm, stamp))),
+                lambda status: self.events.put(("status", status)))
+
+        self.launch(operation)
+
     def stop(self):
         self.cancel.set()
         self.last_read = None
@@ -170,6 +190,7 @@ class HeartRateWindow:
                 self.bpm.set("— BPM")
                 if self.cancel.is_set():
                     self.status.set("Arrêté")
+                self.legacy_button.configure(state="normal")
                 self.scan_button.configure(state="normal")
                 self.connect_button.configure(state="normal" if self.devices else "disabled")
                 self.stop_button.configure(state="disabled")
