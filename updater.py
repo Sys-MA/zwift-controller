@@ -95,6 +95,14 @@ def stage(release):
         path.unlink(missing_ok=True)
         raise
 
+def restart_environment(environ=None):
+    """A new onefile process must extract its own runtime."""
+    env = dict(os.environ if environ is None else environ)
+    env = {key: value for key, value in env.items()
+           if not key.upper().startswith("_PYI_") and key.upper() != "_MEIPASS2"}
+    env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    return env
+
 def launch_installer(staged, expected):
     """The external helper waits for GUI shutdown, replaces the EXE and restarts it."""
     target = Path(sys.executable).resolve()
@@ -107,6 +115,7 @@ def launch_installer(staged, expected):
         return "'" + str(value).replace("'", "''") + "'"
     script = f"""
 $ErrorActionPreference = 'Stop'
+$env:PYINSTALLER_RESET_ENVIRONMENT = '1'
 $target = {literal(target)}
 $staged = {literal(staged)}
 $expected = {literal(expected)}
@@ -144,4 +153,5 @@ try {{
     encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
     powershell = Path(os.environ["SystemRoot"]) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
     subprocess.Popen([str(powershell), "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
-                     creationflags=subprocess.CREATE_NO_WINDOW, close_fds=True)
+                     creationflags=subprocess.CREATE_NO_WINDOW, close_fds=True,
+                     env=restart_environment())
