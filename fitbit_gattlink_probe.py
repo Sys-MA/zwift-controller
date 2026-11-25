@@ -1,7 +1,7 @@
 """Experimental Gattlink transport diagnostic for an owned Fitbit.
 
 Protocol reference: Google-Health-API/golden-gate, xp/gattlink/gg_gattlink.c
-Only answers an observed transport reset request. No device reset, pairing,
+Answers an observed transport reset request and optionally acknowledges data. No device reset, pairing,
 authentication, application requests or collection of multi-byte data payloads.
 """
 import argparse
@@ -25,13 +25,35 @@ def log(message):
     with LOG.open("a", encoding="utf-8") as out:
         out.write(line + "\n")
 
+def describe_frame(frame):
+    """Report only structural metadata, never payload or network addresses."""
+    if len(frame) < 4:
+        return "Incomplete network header"
+    declared = int.from_bytes(frame[2:4], "big")
+    if frame[0] & 0x80:
+        flags = int.from_bytes(frame[:2], "big")
+        proto = {0: "TCP", 0x40: "UDP", 0x80: "ICMP"}.get(flags & 0xc0, "explicit")
+        description = f"Compressed IPv4 candidate: flags={flags:04X} length={declared} protocol={proto}"
+    elif frame[0] >> 4 == 4 and len(frame) >= 20:
+        proto = {6: "TCP", 17: "UDP", 1: "ICMP"}.get(frame[9], "other")
+        description = f"IPv4 candidate: length={declared} protocol={proto}"
+    else:
+        description = "Unknown network framing"
+    candidates = []
+    for i in range(min(64, max(0, len(frame)-12))):
+        if frame[i] in (20, 21, 22, 23) and frame[i+1:i+3] in (b"\xfe\xff", b"\xfe\xfd", b"\xfe\xfc"):
+            length = int.from_bytes(frame[i+11:i+13], "big")
+            if length <= len(frame)-i-13:
+                candidates.append(f"offset={i}, type={frame[i]}, version={frame[i+1:i+3].hex()}, record_length={length}")
+    return description + ("; DTLS signature candidate: " + "; ".join(candidates) if candidates else "; no complete DTLS record signature found")
+
 async def observe(client, args):
     rx = client.services.get_characteristic(RX)
     tx = client.services.get_characteristic(TX)
     if rx is None or "notify" not in rx.properties:
         log("Gattlink RX unavailable.")
         return
-    if args.handshake and (tx is None or "write-without-response" not in tx.properties):
+    if (args.handshake or args.inspect_transport) and (tx is None or "write-without-response" not in tx.properties):
         log("Gattlink TX unavailable.")
         return
     queue = asyncio.Queue(maxsize=128)
@@ -40,6 +62,9 @@ async def observe(client, args):
     start = time.monotonic()
     sent = 0
     ready = False
+    next_psn = 0
+    acks = 0
+    stream = bytearray()
 
     def receive(sender, data):
         # Only control metadata is retained; do not print session or health payloads.
@@ -52,7 +77,7 @@ async def observe(client, args):
     try:
         await asyncio.wait_for(client.start_notify(rx, receive), 8)
         subscriptions.append(rx)
-        log("RX subscribed; handshake=" + str(args.handshake))
+        log("RX subscribed; handshake=" + str(args.handshake or args.inspect_transport))
         if args.other_channels:
             for uuid in (
                 "abbafd04-e56a-484c-b832-8b17cf6cbfe8",
@@ -79,7 +104,7 @@ async def observe(client, args):
                 continue
             if packet == RESET:
                 log(f"RX +{elapsed:.2f}s 80 (Gattlink reset request)")
-                if args.handshake and not ready and sent < 3:
+                if (args.handshake or args.inspect_transport) and not ready and sent < 3:
                     await asyncio.wait_for(client.write_gatt_char(tx, COMPLETE, response=False), 5)
                     sent += 1
                     log("TX 81 00 00 04 04 (transport reset complete)")
@@ -90,14 +115,43 @@ async def observe(client, args):
                     log("Transport handshake confirmed. No application authentication attempted.")
             elif packet and not (packet[0] & 0x80):
                 log(f"RX +{elapsed:.2f}s Gattlink data candidate: length={len(packet)}, header={packet[0]:02X} (payload omitted)")
-                if ready:
+                if ready and args.inspect_transport:
+                    offset = 1 if packet[0] & 0x40 else 0
+                    if len(packet) <= offset + 1:
+                        continue
+                    if packet[offset] & 0xe0:
+                        log("Unexpected data header; stopping.")
+                        break
+                    psn = packet[offset] & 0x1f
+                    if psn == next_psn:
+                        stream.extend(packet[offset+1:])
+                        next_psn = (next_psn + 1) % 32
+                        log(f"PSN={psn} stream_bytes={len(stream)}")
+                        if len(stream) >= 4:
+                            declared = int.from_bytes(stream[2:4], "big")
+                            if 4 <= declared <= len(stream) and (stream[0] & 0x80 or stream[0] >> 4 == 4):
+                                log(describe_frame(stream[:declared]))
+                                del stream[:declared]
+                            else:
+                                log(describe_frame(stream))
+                    elif not (1 <= (next_psn - psn) % 32 <= 4):
+                        log("Out-of-order packet; stopping.")
+                        break
+                    ack = bytes((0x40 | ((next_psn - 1) % 32),))
+                    await asyncio.wait_for(client.write_gatt_char(tx, ack, response=False), 5)
+                    acks += 1
+                    log(f"TX {ack.hex().upper()} (transport ACK only)")
+                    if acks >= 8 or len(stream) > 4096:
+                        log("Diagnostic limit reached.")
+                        break
+                elif ready:
                     log("First transport data observed; stopping before upper-layer negotiation.")
                     break
             else:
                 log(f"RX +{elapsed:.2f}s unclassified length={len(packet)} (payload omitted)")
         log(f"Connected at end: {client.is_connected}")
     finally:
-        log(f"Summary: notifications={dict(counts)} replies={sent} transport_ready={ready}")
+        log(f"Summary: notifications={dict(counts)} replies={sent} acks={acks} transport_ready={ready}")
         for char in reversed(subscriptions):
             if client.is_connected:
                 try:
@@ -133,6 +187,7 @@ def main():
     parser.add_argument("--seconds", type=int, default=30, choices=range(10, 121), metavar="10-120")
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--handshake", action="store_true", help="Respond only to a documented Gattlink reset request")
+    modes.add_argument("--inspect-transport", action="store_true", help="Handshake, inspect network headers, send at most eight transport ACKs")
     modes.add_argument("--other-channels", action="store_true", help="Passive metadata observation of other notify/indicate channels")
     args = parser.parse_args()
     try:
