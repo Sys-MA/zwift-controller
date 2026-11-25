@@ -108,7 +108,9 @@ class Session:
         try:
             raw = self.protection(self.path.read_bytes(), False)
             tokens = json.loads(raw)
-            if isinstance(tokens, dict) and tokens.get("refresh_token"):
+            if (isinstance(tokens, dict) and isinstance(tokens.get("refresh_token"), str)
+                    and tokens["refresh_token"] and isinstance(tokens.get("access_token"), str)
+                    and isinstance(tokens.get("expires_at"), (int, float))):
                 self.tokens = tokens
                 self.persist = True
         except FileNotFoundError:
@@ -118,7 +120,8 @@ class Session:
 
     @property
     def ready(self):
-        return self.tokens is not None and bool(self.tokens.get("refresh_token"))
+        tokens = self.tokens
+        return tokens is not None and bool(tokens.get("refresh_token"))
 
     def _save(self):
         if not self.persist:
