@@ -1,5 +1,5 @@
 import unittest
-from updater import select_release, version_tuple
+from updater import select_release, version_tuple, restart_environment
 
 class UpdaterTests(unittest.TestCase):
     def release(self, tag="v0.8.1", **extra):
@@ -30,3 +30,11 @@ class UpdaterTests(unittest.TestCase):
         release["assets"][0]["browser_download_url"] = "https://example.org/ZwiftController.exe"
         with self.assertRaises(ValueError):
             select_release(release, "0.8.0")
+
+    def test_restart_environment(self):
+        original = {"PATH":"C:/Windows", "_PYI_APPLICATION_HOME_DIR":"old-temp",
+                    "_PYI_ARCHIVE_FILE":"old.exe", "_PYI_PARENT_PROCESS_LEVEL":"1",
+                    "_MEIPASS2":"old-temp"}
+        env = restart_environment(original)
+        self.assertEqual(env, {"PATH":"C:/Windows", "PYINSTALLER_RESET_ENVIRONMENT":"1"})
+        self.assertIn("_PYI_APPLICATION_HOME_DIR", original)
