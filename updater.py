@@ -117,23 +117,29 @@ try {{
     Wait-Process -Id {os.getpid()} -Timeout 90 -ErrorAction SilentlyContinue
     if (Get-Process -Id {os.getpid()} -ErrorAction SilentlyContinue) {{ throw 'Application encore ouverte' }}
     if ((Get-FileHash -LiteralPath $staged -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) {{ throw 'SHA256 invalide' }}
-    [System.IO.File]::Copy($target, $backup, $true)
-    [System.IO.File]::Copy($staged, $target, $true)
-    $replaced = $true
+    # PyInstaller's parent process may still hold the executable briefly.
+    for ($attempt = 0; $attempt -lt 20; $attempt++) {{
+        try {{
+            [System.IO.File]::Replace($staged, $target, $backup, $true)
+            $replaced = $true
+            break
+        }} catch {{
+            if ($attempt -eq 19 -or -not (Test-Path -LiteralPath $staged)) {{ throw }}
+            Start-Sleep -Milliseconds 500
+        }}
+    }}
     Start-Process -FilePath $target
     Remove-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue
 }} catch {{
     $_ | Out-File -LiteralPath $log -Append
-    if ($replaced -or (Test-Path -LiteralPath $backup)) {{
-        try {{ if ($replaced) {{ [System.IO.File]::Copy($backup, $target, $true) }} }} catch {{ $_ | Out-File -LiteralPath $log -Append }}
+    if ($replaced) {{
+        try {{ [System.IO.File]::Copy($backup, $target, $true) }} catch {{ $_ | Out-File -LiteralPath $log -Append }}
     }}
     if (-not (Get-Process -Id {os.getpid()} -ErrorAction SilentlyContinue)) {{
         try {{ Start-Process -FilePath $target }} catch {{ $_ | Out-File -LiteralPath $log -Append }}
     }}
 }}
 """
-    # Mark the replacement before copying, so partial-copy failures also roll back.
-    script = script.replace("[System.IO.File]::Copy($staged, $target, $true)\n    $replaced = $true", "$replaced = $true\n    [System.IO.File]::Copy($staged, $target, $true)")
     encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
     powershell = Path(os.environ["SystemRoot"]) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
     subprocess.Popen([str(powershell), "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
