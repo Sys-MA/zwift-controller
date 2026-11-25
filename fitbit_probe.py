@@ -7,7 +7,8 @@ from bleak import BleakScanner, BleakClient
 
 HEART_SERVICE = "0000180d-0000-1000-8000-00805f9b34fb"
 HEART_MEASUREMENT = "00002a37-0000-1000-8000-00805f9b34fb"
-FITBIT_COMPANY = 0x0224
+FITBIT_COMPANY = 0x018E
+FITBIT_SERVICE = "adabfb00-6e7d-4601-bda2-bffaa68956ba"
 LOG = Path("fitbit-probe.log")
 
 def log(message):
@@ -19,7 +20,8 @@ def log(message):
 def candidate(device, advertisement):
     name = (advertisement.local_name or device.name or "").casefold()
     return ("fitbit" in name or "sense" in name or
-            FITBIT_COMPANY in advertisement.manufacturer_data)
+            FITBIT_COMPANY in advertisement.manufacturer_data or
+            FITBIT_SERVICE in advertisement.service_uuids)
 
 def decode_heart_rate(data):
     if not data:
@@ -30,6 +32,7 @@ def decode_heart_rate(data):
     return int.from_bytes(data[1:1+size], "little")
 
 async def run(args):
+    LOG.write_text("", encoding="utf-8")
     log("Fitbit probe: " + ("scan + inspection" if args.address else "scan only"))
     log(f"Scanning for {args.scan_seconds} seconds...")
     seen = await BleakScanner.discover(timeout=args.scan_seconds, return_adv=True)
