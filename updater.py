@@ -128,7 +128,8 @@ try {{
             Start-Sleep -Milliseconds 500
         }}
     }}
-    Start-Process -FilePath $target
+    Start-Process -FilePath $target -WorkingDirectory (Split-Path -Parent $target)
+    try {{ "[$(Get-Date -Format s)] Replacement complete; restart requested." | Out-File -LiteralPath $log -Append }} catch {{ }}
     Remove-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue
 }} catch {{
     $_ | Out-File -LiteralPath $log -Append
