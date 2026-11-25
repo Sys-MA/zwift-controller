@@ -155,7 +155,10 @@ async def left_session(device, config, battery_enabled, bridge=None, recovery=No
         nonlocal last_rx
         counts[channel] += 1
         last_rx = time.monotonic()
-        debug(f"RX {channel.upper()} #{counts[channel]} | {bytes(data).hex(' ')}")
+        if bytes(data[:2]) == b"\xff\x03":
+            debug(f"RX {channel.upper()} | FF 03 (challenge masque)")
+        else:
+            debug(f"RX {channel.upper()} #{counts[channel]} | {bytes(data).hex(' ')}")
     def sync_notify(sender, data):
         received("sync", data)
     async def status():
@@ -308,8 +311,7 @@ async def dual_sessions(config, bridge, read_right=True, auto_reset=True, reset_
                     log(f"{side} | Challenge authentification Zwift recu (FF 03)")
                     payload = challenge_payload(data)
                     if side == "GAUCHE" and auth_client is not None and auth_client.ready and payload:
-                        if payload != active_challenge:
-                            pending_challenge = payload
+                        pending_challenge = None if payload == active_challenge else payload
                         signed_sent_at = None
                         auth_confirmed = False
                     elif challenges == 2:
