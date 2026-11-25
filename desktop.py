@@ -159,6 +159,37 @@ class App:
                             bordercolor="#e8eef4", lightcolor=color, darkcolor=color, thickness=7, borderwidth=0)
         install_button_styles(root, style)
 
+        # Flat, white input controls matching the rounded action buttons.
+        style.configure("TCombobox", font=("Segoe UI", 10),
+                        padding=(9, 6), fieldbackground="#ffffff",
+                        background="#ffffff", foreground="#153047",
+                        bordercolor="#cbd5e1", lightcolor="#ffffff",
+                        darkcolor="#ffffff", arrowcolor="#526478",
+                        arrowsize=13, borderwidth=1, relief="flat",
+                        selectbackground="#ffffff", selectforeground="#153047")
+        style.map("TCombobox",
+                  fieldbackground=[("disabled", "#e8edf2"), ("readonly", "#ffffff")],
+                  background=[("disabled", "#e8edf2"), ("pressed", "#dce7f0"),
+                              ("active", "#eaf1f7"), ("readonly", "#ffffff")],
+                  foreground=[("disabled", "#64748b"), ("readonly", "#153047")],
+                  bordercolor=[("focus", "#3b82f6"), ("active", "#94a3b8")],
+                  lightcolor=[("readonly", "#ffffff")],
+                  darkcolor=[("readonly", "#ffffff")],
+                  selectbackground=[("readonly", "#ffffff")],
+                  selectforeground=[("readonly", "#153047")])
+        root.option_add("*TCombobox*Listbox.font", ("Segoe UI", 10))
+        root.option_add("*TCombobox*Listbox.background", "#ffffff")
+        root.option_add("*TCombobox*Listbox.foreground", "#153047")
+        root.option_add("*TCombobox*Listbox.selectBackground", "#e0eaf4")
+        root.option_add("*TCombobox*Listbox.selectForeground", "#153047")
+        root.option_add("*TCombobox*Listbox.borderWidth", 0)
+        root.option_add("*TCombobox*Listbox.highlightThickness", 0)
+        style.configure("TEntry", padding=(9, 6), fieldbackground="#ffffff",
+                        foreground="#153047", bordercolor="#cbd5e1",
+                        lightcolor="#ffffff", darkcolor="#ffffff", borderwidth=1)
+        style.map("TEntry", bordercolor=[("focus", "#3b82f6")],
+                  fieldbackground=[("disabled", "#e8edf2"), ("!disabled", "#ffffff")])
+
         frame = ttk.Frame(root, padding=20, style="Dashboard.TFrame")
         frame.pack(fill="both", expand=True)
         header = ttk.Frame(frame, style="Dashboard.TFrame")
