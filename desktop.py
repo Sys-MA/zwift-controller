@@ -103,6 +103,43 @@ def install_button_styles(root, style):
     root._rounded_button_images = images
 
 
+def install_combobox_arrow(root, style):
+    """Replace the clam arrow button with an unframed chevron."""
+    from PIL import Image, ImageDraw, ImageTk
+
+    def chevron(color, surface):
+        scale = 3
+        width, height = 32, 24
+        image = Image.new("RGB", (width * scale, height * scale), surface)
+        draw = ImageDraw.Draw(image)
+        points = [(10 * scale, 9 * scale), (16 * scale, 15 * scale),
+                  (22 * scale, 9 * scale)]
+        draw.line(points, fill=color, width=2 * scale, joint="curve")
+        return ImageTk.PhotoImage(
+            image.resize((width, height), Image.Resampling.LANCZOS), master=root)
+
+    normal = chevron("#526478", "#ffffff")
+    active = chevron("#153047", "#ffffff")
+    disabled = chevron("#94a3b8", "#e8edf2")
+    style.element_create("ModernCombobox.downarrow", "image", normal,
+                         ("disabled", disabled), ("active", active), sticky="")
+    # Keep the native field and text elements, including keyboard accessibility,
+    # and retain the downarrow suffix used by the ttk mouse bindings.
+    def replace_arrow(layout):
+        result = []
+        for element, options in layout:
+            options = dict(options)
+            if element.rsplit(".", 1)[-1] == "downarrow":
+                element = "ModernCombobox.downarrow"
+            if "children" in options:
+                options["children"] = replace_arrow(options["children"])
+            result.append((element, options))
+        return result
+
+    style.layout("TCombobox", replace_arrow(style.layout("TCombobox")))
+    root._combobox_arrow_images = (normal, active, disabled)
+
+
 class App:
     def __init__(self, root):
         self.root = root
@@ -161,7 +198,7 @@ class App:
 
         # Flat, white input controls matching the rounded action buttons.
         style.configure("TCombobox", font=("Segoe UI", 10),
-                        padding=(9, 6), fieldbackground="#ffffff",
+                        padding=(12, 7), fieldbackground="#ffffff",
                         background="#ffffff", foreground="#153047",
                         bordercolor="#cbd5e1", lightcolor="#ffffff",
                         darkcolor="#ffffff", arrowcolor="#526478",
@@ -184,6 +221,11 @@ class App:
         root.option_add("*TCombobox*Listbox.selectForeground", "#153047")
         root.option_add("*TCombobox*Listbox.borderWidth", 0)
         root.option_add("*TCombobox*Listbox.highlightThickness", 0)
+        root.option_add("*TCombobox*Listbox.selectBorderWidth", 4)
+        root.option_add("*TCombobox*Listbox.activestyle", "none")
+        style.configure("ComboboxPopdownFrame", borderwidth=1, relief="flat",
+                        background="#cbd5e1")
+        install_combobox_arrow(root, style)
         style.configure("TEntry", padding=(9, 6), fieldbackground="#ffffff",
                         foreground="#153047", bordercolor="#cbd5e1",
                         lightcolor="#ffffff", darkcolor="#ffffff", borderwidth=1)
