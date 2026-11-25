@@ -83,6 +83,7 @@ class App:
         style.configure("Card.TFrame", background="#ffffff")
         style.configure("Dashboard.TLabel", background="#f1f5f9", foreground="#172c40")
         style.configure("Muted.TLabel", background="#f1f5f9", foreground="#526478")
+        style.configure("AuthWarning.TLabel", background="#f1f5f9", foreground="#b91c1c", font=("Segoe UI", 10, "bold"))
         style.configure("Card.TLabel", background="#ffffff", foreground="#172c40")
         style.configure("Battery.TLabel", background="#ffffff", foreground="#172c40", font=("Segoe UI", 28, "bold"))
         style.configure("Primary.TButton", background="#153047", foreground="#ffffff", padding=(12, 10), borderwidth=0)
@@ -127,7 +128,7 @@ class App:
             self.battery_bars[side] = bar
             self.recovery_times[side] = tk.StringVar(value="Reconnexion : -")
             self.button_counts[side] = tk.IntVar(value=0)
-            self.auth_states[side] = tk.StringVar(value="Auth : aucune demande")
+            self.auth_states[side] = tk.StringVar(value="")
             ttk.Label(panel, textvariable=self.recovery_times[side], style="Card.TLabel", font=("Segoe UI", 9)).pack(anchor="w")
             chips = ttk.Frame(panel, style="Card.TFrame")
             chips.pack(fill="x", pady=(9, 0))
@@ -137,11 +138,12 @@ class App:
                 chip.pack(side="left", padx=(0,3))
                 self.button_labels[button] = chip
 
-        self.auth = tk.StringVar(value="Authentification : aucune demande")
+        self.auth = tk.StringVar(value="")
         self.game_status = tk.StringVar(value="MyWhoosh : premier plan non verifie")
         self.last_button = tk.StringVar(value="Dernier bouton : -")
-        ttk.Label(frame, textvariable=self.auth, style="Muted.TLabel", wraplength=460).pack(anchor="w")
-        ttk.Label(frame, textvariable=self.game_status, style="Muted.TLabel", wraplength=460).pack(anchor="w", pady=(3, 0))
+        self.auth_warning = ttk.Label(frame, textvariable=self.auth, style="AuthWarning.TLabel", wraplength=460)
+        self.game_label = ttk.Label(frame, textvariable=self.game_status, style="Muted.TLabel", wraplength=460)
+        self.game_label.pack(anchor="w", pady=(3, 0))
         ttk.Label(frame, textvariable=self.last_button, style="Dashboard.TLabel").pack(anchor="w", pady=(3, 12))
 
         ttk.Button(frame, text="Configurer les boutons", style="Primary.TButton", command=self.open_buttons).pack(fill="x")
@@ -257,7 +259,7 @@ class App:
             row = ttk.Frame(frame)
             row.pack(fill="x")
             ttk.Label(row, text=side + " : ", font=("Segoe UI", 10, "bold")).pack(side="left")
-            ttk.Label(row, textvariable=self.auth_states[side]).pack(side="left")
+            ttk.Label(row, textvariable=self.auth_states[side], foreground="#b91c1c").pack(side="left")
             ttk.Label(row, textvariable=self.button_counts[side]).pack(side="right")
             ttk.Label(row, text="Pressions :").pack(side="right")
         actions = ttk.Frame(frame)
@@ -336,7 +338,8 @@ class App:
         self.status.set("Recherche Bluetooth...")
         self.connected.clear()
         self.reset_event.clear()
-        self.auth.set("Authentification : aucune demande")
+        self.auth.set("")
+        self.auth_warning.pack_forget()
         for label in self.button_labels.values():
             label.configure(bg="#e8eef4", fg="#153047")
         for side in self.connections:
@@ -344,7 +347,7 @@ class App:
             self.connection_labels[side].configure(foreground="#526478")
             self.levels[side].set("-- %")
             self.battery_bars[side]["value"] = 0
-            self.auth_states[side].set("Auth : aucune demande")
+            self.auth_states[side].set("")
             self.button_counts[side].set(0)
         mode = self.config.get("output_mode", "Clavier")
         args = {"Clavier": ["--keyboard"], "OpenBikeControl": ["--obc"],
@@ -461,8 +464,10 @@ class App:
                 if " | AUTH | " in value:
                     side = value.split(" | ")[0]
                     if side in self.auth_states:
-                        self.auth_states[side].set("Auth : renouvellement recommande")
-                    self.auth.set("Authentification : jumelage Zwift recommande. Arreter le programme avant.")
+                        self.auth_states[side].set("Authentification Zwift requise")
+                    self.auth.set("Authentification Zwift requise. Arreter le programme, puis jumeler dans Zwift.")
+                    if not self.auth_warning.winfo_manager():
+                        self.auth_warning.pack(before=self.game_label, anchor="w", fill="x", pady=(0, 5))
                     if self.tray:
                         try:
                             self.tray.notify("Jumeler les manettes dans Zwift avant de reprendre.", "Authentification Zwift")
