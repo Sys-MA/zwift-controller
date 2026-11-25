@@ -271,7 +271,7 @@ class App:
         root.geometry("520x370")
         root.minsize(500, 350)
         root.configure(bg="#f1f5f9")
-        root.protocol("WM_DELETE_WINDOW", self.hide)
+        root.protocol("WM_DELETE_WINDOW", self.on_close)
 
         style = ttk.Style(root)
         style.theme_use("clam")
@@ -500,10 +500,11 @@ class App:
         fast = tk.BooleanVar(value=self.config.get("fast_reconnect", True))
         diag = tk.BooleanVar(value=self.config.get("diagnostics", False))
         auto_game = tk.BooleanVar(value=self.config.get("auto_mywhoosh", False))
+        close_quits = tk.BooleanVar(value=self.config.get("close_quits", False))
         auto = tk.BooleanVar(value=autostart_enabled())
         ttk.Label(frame, text="Mode de sortie", font=("Segoe UI", 12, "bold")).pack(anchor="w")
         ModernSelect(frame, textvariable=mode, values=("Clavier","OpenBikeControl","Bluetooth seulement"), width=30).pack(fill="x", pady=(4,12))
-        for title, var in (("Démarrer avec Windows", auto), ("Connecter les manettes seulement lorsque MyWhoosh est ouvert", auto_game), ("Reconnexion rapide (cache GATT Windows)", fast), ("Redemarrage de secours (gauche)", auto_reset), ("Logs de diagnostic detailles", diag)):
+        for title, var in (("Démarrer avec Windows", auto), ("Quitter complètement en fermant la fenêtre (X)", close_quits), ("Connecter les manettes seulement lorsque MyWhoosh est ouvert", auto_game), ("Reconnexion rapide (cache GATT Windows)", fast), ("Redemarrage de secours (gauche)", auto_reset), ("Logs de diagnostic detailles", diag)):
             ttk.Checkbutton(frame, text=title, variable=var).pack(anchor="w", pady=4)
         ttk.Label(frame, text="En mode automatique, les manettes sont libérées après 10 secondes sans MyWhoosh. Les commandes manuelles restent disponibles.", wraplength=390, foreground="#526478").pack(anchor="w", pady=(6,0))
         def save():
@@ -512,7 +513,7 @@ class App:
             except OSError as exc:
                 messagebox.showerror("Options", str(exc), parent=win)
                 return
-            if self.save_settings({"output_mode":mode.get(),"auto_reset":auto_reset.get(),"fast_reconnect":fast.get(),"diagnostics":diag.get(),"auto_mywhoosh":auto_game.get()}, win):
+            if self.save_settings({"output_mode":mode.get(),"auto_reset":auto_reset.get(),"fast_reconnect":fast.get(),"diagnostics":diag.get(),"auto_mywhoosh":auto_game.get(),"close_quits":close_quits.get()}, win):
                 win.destroy()
         ttk.Button(frame, text="Compte Zwift", command=self.open_account).pack(anchor="w", pady=(14,0))
         ttk.Button(frame, text="Vérifier les mises à jour", command=lambda: self.check_update(True)).pack(anchor="w", pady=(8,0))
@@ -736,6 +737,12 @@ class App:
                 pystray.MenuItem("Ouvrir", lambda *a: self.events.put(("show", None)), default=True),
                 pystray.MenuItem("Quitter", lambda *a: self.events.put(("quit", None)))))
         threading.Thread(target=self.tray.run, daemon=True).start()
+
+    def on_close(self):
+        if self.config.get("close_quits", False):
+            self.quit()
+        else:
+            self.hide()
 
     def hide(self):
         if self.tray is not None and self.tray.visible:
