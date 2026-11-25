@@ -7,3 +7,5 @@ dist/
 *.spec
 
 debug.log
+
+fitbit-probe.log
