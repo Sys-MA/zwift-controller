@@ -9,7 +9,10 @@ import subprocess
 import sys
 import threading
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
+import shutil
+import ctypes
+from bike_icon import make_icon
 
 import zwift_controller as core
 from keyboard_output import DEFAULT_KEYS, key_code
@@ -59,8 +62,11 @@ class App:
         self.reset_event = threading.Event()
         self.reset_count = 0
         self.config = core.load_config()
-        root.title("Zwift Controller 0.7.0")
-        root.geometry("700x780")
+        root.title("Zwift Controller 0.7.1")
+        from PIL import ImageTk
+        self.window_icon = ImageTk.PhotoImage(make_icon(64))
+        root.iconphoto(True, self.window_icon)
+        root.geometry("780x900")
         root.minsize(650, 720)
         root.protocol("WM_DELETE_WINDOW", self.hide)
         root.columnconfigure(0, weight=1)
@@ -68,7 +74,7 @@ class App:
         frame = ttk.Frame(root, padding=20)
         frame.grid(sticky="nsew")
         frame.columnconfigure(0, weight=1)
-        frame.rowconfigure(8, weight=1)
+        frame.rowconfigure(9, weight=1)
         ttk.Label(frame, text="Zwift Controller", font=("Segoe UI", 20, "bold")).grid(sticky="w")
         self.status = tk.StringVar(value="En attente")
         ttk.Label(frame, textvariable=self.status).grid(sticky="w", pady=(0,12))
@@ -76,6 +82,9 @@ class App:
         batteries.grid(sticky="ew")
         self.levels = {}
         self.connections = {}
+        self.recovery_times = {}
+        self.button_counts = {}
+        self.auth_states = {}
         self.connected = set()
         for i, side in enumerate(("GAUCHE", "DROITE")):
             batteries.columnconfigure(i, weight=1)
@@ -86,6 +95,12 @@ class App:
             ttk.Label(panel, textvariable=value).pack(anchor="w")
             self.connections[side] = tk.StringVar(value="En attente")
             ttk.Label(panel, textvariable=self.connections[side]).pack(anchor="w")
+            self.recovery_times[side] = tk.StringVar(value="Reconnexion : -")
+            self.button_counts[side] = tk.IntVar(value=0)
+            self.auth_states[side] = tk.StringVar(value="Auth : aucune demande")
+            ttk.Label(panel, textvariable=self.recovery_times[side]).pack(anchor="w")
+            ttk.Label(panel, textvariable=self.auth_states[side]).pack(anchor="w")
+            ttk.Label(panel, textvariable=self.button_counts[side]).pack(anchor="w")
         options = ttk.Frame(frame)
         options.grid(sticky="ew", pady=12)
         self.mode = tk.StringVar(value=self.config.get("output_mode", "Clavier"))
@@ -103,20 +118,34 @@ class App:
         self.fast_reconnect = tk.BooleanVar(value=self.config.get("fast_reconnect", True))
         ttk.Checkbutton(recovery, text="Redemarrage de secours (gauche)", variable=self.auto_reset).pack(anchor="w")
         ttk.Checkbutton(recovery, text="Reconnexion rapide (cache GATT Windows)", variable=self.fast_reconnect).pack(anchor="w")
+        self.diagnostics = tk.BooleanVar(value=self.config.get("diagnostics", False))
+        ttk.Checkbutton(recovery, text="Logs de diagnostic", variable=self.diagnostics).pack(anchor="w")
+        ttk.Button(recovery, text="Exporter le log", command=self.export_log).pack(anchor="w")
+        self.game_status = tk.StringVar(value="MyWhoosh : premier plan non verifie")
+        ttk.Label(recovery, textvariable=self.game_status).pack(anchor="w")
         mappings = ttk.LabelFrame(frame, text="Touches MyWhoosh (modifiables)", padding=10)
         mappings.grid(sticky="ew")
         mappings.columnconfigure(1, weight=1)
-        mappings.columnconfigure(3, weight=1)
+        mappings.columnconfigure(4, weight=1)
         self.keys = {}
+        self.press_modes = {}
+        self.button_labels = {}
+        self.last_button = tk.StringVar(value="Dernier bouton : -")
         current = DEFAULT_KEYS | self.config.get("keyboard_mapping", {})
         for i, button in enumerate(DEFAULT_KEYS):
             row, col = divmod(i, 2)
-            col *= 2
-            ttk.Label(mappings, text=button).grid(row=row, column=col, sticky="w", padx=5, pady=3)
+            col *= 3
+            label = tk.Label(mappings, text=button, width=8)
+            label.grid(row=row, column=col, sticky="w", padx=5, pady=3)
+            self.button_labels[button] = label
             var = tk.StringVar(value=current.get(button) or "")
             self.keys[button] = var
-            ttk.Entry(mappings, textvariable=var, width=12).grid(row=row, column=col+1, sticky="ew", padx=6)
-        ttk.Label(frame, text="I/K valides. Autres touches a tester. Vide = desactive.").grid(sticky="w", pady=5)
+            ttk.Entry(mappings, textvariable=var, width=7).grid(row=row, column=col+1, sticky="ew", padx=4)
+            mode = tk.StringVar(value=self.config.get("keyboard_modes", {}).get(button, "Simple"))
+            self.press_modes[button] = mode
+            ttk.Combobox(mappings, textvariable=mode, values=("Simple", "Maintenue", "Repetition"), state="readonly", width=12).grid(row=row, column=col+2, padx=3)
+        ttk.Label(frame, text="A/D et C a valider en roulant. Vide = desactive.").grid(sticky="w", pady=5)
+        ttk.Label(frame, textvariable=self.last_button).grid(sticky="w")
         controls = ttk.Frame(frame)
         controls.grid(sticky="ew", pady=6)
         ttk.Button(controls, text="Appliquer / reconnecter", command=self.apply).pack(side="left")
@@ -130,6 +159,18 @@ class App:
         self.setup_tray()
         self.root.after(100, self.poll)
 
+    def export_log(self):
+        source = core.CONFIG.with_name("debug.log")
+        if not source.exists():
+            messagebox.showinfo("Diagnostic", "Activer les logs et appliquer les reglages.")
+            return
+        destination = filedialog.asksaveasfilename(defaultextension=".log", initialfile="zwift-debug.log")
+        if destination:
+            try:
+                shutil.copyfile(source, destination)
+            except OSError as exc:
+                messagebox.showerror("Diagnostic", str(exc))
+
     def toggle_auto(self):
         try:
             set_autostart(self.auto.get())
@@ -139,13 +180,7 @@ class App:
 
     def setup_tray(self):
         import pystray
-        from PIL import Image, ImageDraw
-        image = Image.new("RGBA", (64, 64), "#153047")
-        draw = ImageDraw.Draw(image)
-        draw.rounded_rectangle((8, 15, 56, 49), radius=12, fill="#2e9e80")
-        draw.line((17,32,33,32), fill="white", width=4)
-        draw.line((25,24,25,40), fill="white", width=4)
-        draw.ellipse((40,27,49,36), fill="white")
+        image = make_icon(64)
         self.tray = pystray.Icon("ZwiftController", image, "Zwift Controller",
             menu=pystray.Menu(
                 pystray.MenuItem("Ouvrir", lambda *a: self.events.put(("show", None)), default=True),
@@ -173,6 +208,8 @@ class App:
         self.auth.set("Aucune demande detectee")
         for side in self.connections:
             self.connections[side].set("En attente")
+            self.auth_states[side].set("Auth : aucune demande")
+            self.button_counts[side].set(0)
         mode = self.mode.get()
         args = {"Clavier": ["--keyboard"], "OpenBikeControl": ["--obc"],
                 "Bluetooth seulement": ["--no-obc"]}[mode]
@@ -181,6 +218,8 @@ class App:
             args.append("--no-auto-reset")
         if self.fast_reconnect.get():
             args.append("--fast-reconnect")
+        if self.diagnostics.get():
+            args.append("--debug")
         def run():
             async def entry():
                 self.loop = asyncio.get_running_loop()
@@ -232,7 +271,9 @@ class App:
             for key in mapping.values():
                 key_code(key)
             self.config.update(keyboard_mapping=mapping, output_mode=self.mode.get(),
-                               auto_reset=self.auto_reset.get(), fast_reconnect=self.fast_reconnect.get())
+                               auto_reset=self.auto_reset.get(), fast_reconnect=self.fast_reconnect.get(),
+                               diagnostics=self.diagnostics.get(), keyboard_mapping_version=2,
+                               keyboard_modes={b: v.get() for b, v in self.press_modes.items()})
             core.CONFIG.write_text(json.dumps(self.config, indent=2), encoding="utf-8")
         except (ValueError, OSError) as exc:
             messagebox.showerror("Configuration", str(exc))
@@ -282,7 +323,25 @@ class App:
                 match = re.search(r"(GAUCHE|DROITE) \| Batterie : (\d+)%", value)
                 if match:
                     self.levels[match[1]].set(f"Batterie : {match[2]} % (derniere lecture)")
+                button = re.match(r"(GAUCHE|DROITE) \| (\w+) \| (ENFONCE|RELACHE) \|", value)
+                if button and button[2] in self.button_labels:
+                    pressed = button[3] == "ENFONCE"
+                    label = self.button_labels[button[2]]
+                    label.configure(bg="#16805d" if pressed else self.root.cget("bg"), fg="white" if pressed else "black")
+                    if pressed:
+                        self.button_counts[button[1]].set(self.button_counts[button[1]].get()+1)
+                        self.last_button.set(f"Dernier bouton : {button[2]} -> {self.keys[button[2]].get()}")
+                timing = re.match(r"(GAUCHE|DROITE) \| RECOVERY \| initialisation en ([0-9.]+)s", value)
+                if timing:
+                    self.recovery_times[timing[1]].set(f"Reconnexion : {timing[2]} s")
+                if value.startswith("CLAVIER | FOCUS |"):
+                    self.game_status.set(value.split(" | ")[-1])
+                if value.startswith("CLAVIER | SendInput incomplet"):
+                    self.game_status.set("Injection clavier impossible : verifier les droits administrateur")
                 if " | AUTH | " in value:
+                    side = value.split(" | ")[0]
+                    if side in self.auth_states:
+                        self.auth_states[side].set("Auth : renouvellement recommande")
                     self.auth.set("Renouvellement recommande : fermer ce programme, jumeler dans Zwift, puis relancer.")
                     if self.tray:
                         try:
@@ -309,7 +368,17 @@ class App:
             self.root.after(100, self.poll)
 
 def main():
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p]
+    kernel.CreateMutexW.restype = ctypes.c_void_p
+    mutex = kernel.CreateMutexW(None, False, "Local\\ZwiftControllerDesktop")
+    already_running = ctypes.get_last_error() == 183
     root = tk.Tk()
+    if not mutex or already_running:
+        root.withdraw()
+        messagebox.showinfo("Zwift Controller", "Une instance est deja ouverte ou le verrou Windows est indisponible.")
+        root.destroy()
+        return
     app = App(root)
     original = core.log
     def log(message):
