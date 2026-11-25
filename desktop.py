@@ -1,5 +1,6 @@
 """Windows desktop UI for Zwift Controller."""
 import asyncio
+from collections import deque
 import json
 import os
 from pathlib import Path
@@ -62,102 +63,240 @@ class App:
         self.reset_event = threading.Event()
         self.reset_count = 0
         self.config = core.load_config()
-        root.title("Zwift Controller 0.7.1")
+        self.log_history = deque(maxlen=500)
+        self.logs = None
+        self.dialogs = {}
+        self.button_labels = {}
+        self.pressed = set()
+        root.title("Zwift Controller 0.7.2")
         from PIL import ImageTk
         self.window_icon = ImageTk.PhotoImage(make_icon(64))
         root.iconphoto(True, self.window_icon)
-        root.geometry("780x900")
-        root.minsize(650, 720)
+        root.geometry("560x460")
+        root.minsize(510, 430)
+        root.configure(bg="#f1f5f9")
         root.protocol("WM_DELETE_WINDOW", self.hide)
-        root.columnconfigure(0, weight=1)
-        root.rowconfigure(0, weight=1)
-        frame = ttk.Frame(root, padding=20)
-        frame.grid(sticky="nsew")
-        frame.columnconfigure(0, weight=1)
-        frame.rowconfigure(9, weight=1)
-        ttk.Label(frame, text="Zwift Controller", font=("Segoe UI", 20, "bold")).grid(sticky="w")
+
+        style = ttk.Style(root)
+        style.theme_use("clam")
+        style.configure(".", font=("Segoe UI", 10))
+        style.configure("Dashboard.TFrame", background="#f1f5f9")
+        style.configure("Card.TFrame", background="#ffffff")
+        style.configure("Dashboard.TLabel", background="#f1f5f9", foreground="#172c40")
+        style.configure("Muted.TLabel", background="#f1f5f9", foreground="#526478")
+        style.configure("Card.TLabel", background="#ffffff", foreground="#172c40")
+        style.configure("Battery.TLabel", background="#ffffff", foreground="#172c40", font=("Segoe UI", 28, "bold"))
+        style.configure("Primary.TButton", background="#153047", foreground="#ffffff", padding=(12, 10), borderwidth=0)
+        style.map("Primary.TButton", background=[("active", "#254b66"), ("pressed", "#102437")])
+        style.configure("TButton", padding=(10, 7))
+
+        frame = ttk.Frame(root, padding=20, style="Dashboard.TFrame")
+        frame.pack(fill="both", expand=True)
+        header = ttk.Frame(frame, style="Dashboard.TFrame")
+        header.pack(fill="x")
+        ttk.Label(header, image=self.window_icon, style="Dashboard.TLabel").pack(side="left", padx=(0,12))
+        titles = ttk.Frame(header, style="Dashboard.TFrame")
+        titles.pack(side="left", fill="x", expand=True)
+        ttk.Label(titles, text="Zwift Controller", style="Dashboard.TLabel", font=("Segoe UI", 20, "bold")).pack(anchor="w")
         self.status = tk.StringVar(value="En attente")
-        ttk.Label(frame, textvariable=self.status).grid(sticky="w", pady=(0,12))
-        batteries = ttk.Frame(frame)
-        batteries.grid(sticky="ew")
+        ttk.Label(titles, textvariable=self.status, style="Muted.TLabel").pack(anchor="w")
+        ttk.Label(header, text="0.7.2", style="Muted.TLabel").pack(side="right", anchor="n")
+
+        batteries = ttk.Frame(frame, style="Dashboard.TFrame")
+        batteries.pack(fill="x", pady=(18, 12))
         self.levels = {}
         self.connections = {}
+        self.connection_labels = {}
+        self.battery_bars = {}
         self.recovery_times = {}
         self.button_counts = {}
         self.auth_states = {}
         self.connected = set()
         for i, side in enumerate(("GAUCHE", "DROITE")):
-            batteries.columnconfigure(i, weight=1)
-            panel = ttk.LabelFrame(batteries, text=side.title(), padding=12)
-            panel.grid(row=0, column=i, sticky="ew", padx=4)
-            value = tk.StringVar(value="Batterie : inconnue")
-            self.levels[side] = value
-            ttk.Label(panel, textvariable=value).pack(anchor="w")
+            batteries.columnconfigure(i, weight=1, uniform="cards")
+            panel = ttk.Frame(batteries, padding=14, style="Card.TFrame")
+            panel.grid(row=0, column=i, sticky="nsew", padx=(0, 6) if i == 0 else (6, 0))
+            ttk.Label(panel, text="Manette " + side.lower(), style="Card.TLabel", font=("Segoe UI", 11, "bold")).pack(anchor="w")
             self.connections[side] = tk.StringVar(value="En attente")
-            ttk.Label(panel, textvariable=self.connections[side]).pack(anchor="w")
+            label = ttk.Label(panel, textvariable=self.connections[side], style="Card.TLabel")
+            label.pack(anchor="w", pady=(3, 5))
+            self.connection_labels[side] = label
+            self.levels[side] = tk.StringVar(value="-- %")
+            ttk.Label(panel, textvariable=self.levels[side], style="Battery.TLabel").pack(anchor="w")
+            bar = ttk.Progressbar(panel, maximum=100, mode="determinate")
+            bar.pack(fill="x", pady=(0, 8))
+            self.battery_bars[side] = bar
             self.recovery_times[side] = tk.StringVar(value="Reconnexion : -")
             self.button_counts[side] = tk.IntVar(value=0)
             self.auth_states[side] = tk.StringVar(value="Auth : aucune demande")
-            ttk.Label(panel, textvariable=self.recovery_times[side]).pack(anchor="w")
-            ttk.Label(panel, textvariable=self.auth_states[side]).pack(anchor="w")
-            ttk.Label(panel, textvariable=self.button_counts[side]).pack(anchor="w")
-        options = ttk.Frame(frame)
-        options.grid(sticky="ew", pady=12)
-        self.mode = tk.StringVar(value=self.config.get("output_mode", "Clavier"))
-        ttk.Label(options, text="Mode :").pack(side="left")
-        ttk.Combobox(options, textvariable=self.mode, state="readonly",
-                     values=("Clavier", "OpenBikeControl", "Bluetooth seulement"), width=23).pack(side="left", padx=8)
-        self.auto = tk.BooleanVar(value=autostart_enabled())
-        ttk.Checkbutton(options, text="Demarrer avec Windows", variable=self.auto,
-                        command=self.toggle_auto).pack(side="right")
-        recovery = ttk.LabelFrame(frame, text="Authentification Zwift", padding=8)
-        recovery.grid(sticky="ew", pady=(0, 8))
-        self.auth = tk.StringVar(value="Aucune demande detectee")
-        ttk.Label(recovery, textvariable=self.auth, wraplength=600).pack(anchor="w")
-        self.auto_reset = tk.BooleanVar(value=self.config.get("auto_reset", False))
-        self.fast_reconnect = tk.BooleanVar(value=self.config.get("fast_reconnect", True))
-        ttk.Checkbutton(recovery, text="Redemarrage de secours (gauche)", variable=self.auto_reset).pack(anchor="w")
-        ttk.Checkbutton(recovery, text="Reconnexion rapide (cache GATT Windows)", variable=self.fast_reconnect).pack(anchor="w")
-        self.diagnostics = tk.BooleanVar(value=self.config.get("diagnostics", False))
-        ttk.Checkbutton(recovery, text="Logs de diagnostic", variable=self.diagnostics).pack(anchor="w")
-        ttk.Button(recovery, text="Exporter le log", command=self.export_log).pack(anchor="w")
+            ttk.Label(panel, textvariable=self.recovery_times[side], style="Card.TLabel", font=("Segoe UI", 9)).pack(anchor="w")
+            chips = ttk.Frame(panel, style="Card.TFrame")
+            chips.pack(fill="x", pady=(9, 0))
+            buttons = (("HAUT","↑"),("GAUCHE","←"),("DROITE","→"),("BAS","↓"),("MOINS","−")) if i == 0 else (("A","A"),("B","B"),("Y","Y"),("Z","Z"),("PLUS","+"))
+            for button, symbol in buttons:
+                chip = tk.Label(chips, text=symbol, width=2, bg="#e8eef4", fg="#153047", font=("Segoe UI", 10, "bold"), padx=2, pady=4)
+                chip.pack(side="left", padx=(0,3))
+                self.button_labels[button] = chip
+
+        self.auth = tk.StringVar(value="Authentification : aucune demande")
         self.game_status = tk.StringVar(value="MyWhoosh : premier plan non verifie")
-        ttk.Label(recovery, textvariable=self.game_status).pack(anchor="w")
-        mappings = ttk.LabelFrame(frame, text="Touches MyWhoosh (modifiables)", padding=10)
-        mappings.grid(sticky="ew")
-        mappings.columnconfigure(1, weight=1)
-        mappings.columnconfigure(4, weight=1)
-        self.keys = {}
-        self.press_modes = {}
-        self.button_labels = {}
         self.last_button = tk.StringVar(value="Dernier bouton : -")
-        current = DEFAULT_KEYS | self.config.get("keyboard_mapping", {})
-        for i, button in enumerate(DEFAULT_KEYS):
-            row, col = divmod(i, 2)
-            col *= 3
-            label = tk.Label(mappings, text=button, width=8)
-            label.grid(row=row, column=col, sticky="w", padx=5, pady=3)
-            self.button_labels[button] = label
-            var = tk.StringVar(value=current.get(button) or "")
-            self.keys[button] = var
-            ttk.Entry(mappings, textvariable=var, width=7).grid(row=row, column=col+1, sticky="ew", padx=4)
-            mode = tk.StringVar(value=self.config.get("keyboard_modes", {}).get(button, "Simple"))
-            self.press_modes[button] = mode
-            ttk.Combobox(mappings, textvariable=mode, values=("Simple", "Maintenue", "Repetition"), state="readonly", width=12).grid(row=row, column=col+2, padx=3)
-        ttk.Label(frame, text="A/D et C a valider en roulant. Vide = desactive.").grid(sticky="w", pady=5)
-        ttk.Label(frame, textvariable=self.last_button).grid(sticky="w")
-        controls = ttk.Frame(frame)
-        controls.grid(sticky="ew", pady=6)
-        ttk.Button(controls, text="Appliquer / reconnecter", command=self.apply).pack(side="left")
-        ttk.Button(controls, text="Arreter", command=self.stop).pack(side="left", padx=8)
+        ttk.Label(frame, textvariable=self.auth, style="Muted.TLabel", wraplength=460).pack(anchor="w")
+        ttk.Label(frame, textvariable=self.game_status, style="Muted.TLabel", wraplength=460).pack(anchor="w", pady=(3, 0))
+        ttk.Label(frame, textvariable=self.last_button, style="Dashboard.TLabel").pack(anchor="w", pady=(3, 12))
+
+        ttk.Button(frame, text="Configurer les boutons", style="Primary.TButton", command=self.open_buttons).pack(fill="x")
+        controls = ttk.Frame(frame, style="Dashboard.TFrame")
+        controls.pack(fill="x", pady=(8,0))
+        ttk.Button(controls, text="Reconnecter", command=self.reconnect).pack(side="left")
+        ttk.Button(controls, text="Options", command=self.open_options).pack(side="left", padx=6)
+        ttk.Button(controls, text="Diagnostics", command=self.open_diagnostics).pack(side="right")
+        footer = ttk.Frame(frame, style="Dashboard.TFrame")
+        footer.pack(fill="x", side="bottom", pady=(8,0))
+        ttk.Button(footer, text="Arreter", command=self.stop).pack(side="left")
+        ttk.Button(footer, text="Quitter", command=self.quit).pack(side="right")
         self.reset_label = tk.StringVar(value="Reboots : 0")
-        ttk.Button(controls, text="Reset gauche", command=self.request_reset).pack(side="left")
-        ttk.Label(controls, textvariable=self.reset_label).pack(side="left", padx=6)
-        ttk.Button(controls, text="Quitter", command=self.quit).pack(side="right")
-        self.logs = tk.Text(frame, height=8, wrap="word", state="disabled", font=("Consolas", 9))
-        self.logs.grid(sticky="nsew", pady=(8,0))
         self.setup_tray()
         self.root.after(100, self.poll)
+
+    def dialog(self, name, title):
+        existing = self.dialogs.get(name)
+        if existing is not None and existing.winfo_exists():
+            existing.deiconify()
+            existing.lift()
+            return None
+        win = tk.Toplevel(self.root)
+        win.title(title)
+        win.transient(self.root)
+        self.dialogs[name] = win
+        return win
+
+    def open_buttons(self):
+        win = self.dialog("buttons", "Configurer les boutons")
+        if win is None:
+            return
+        frame = ttk.Frame(win, padding=20)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text="Raccourcis MyWhoosh", font=("Segoe UI", 16, "bold")).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0,12))
+        ttk.Label(frame, text="Bouton").grid(row=1, column=0, sticky="w")
+        ttk.Label(frame, text="Touche").grid(row=1, column=1, sticky="w")
+        ttk.Label(frame, text="Mode de pression").grid(row=1, column=2, sticky="w")
+        ttk.Label(frame, text="Action").grid(row=1, column=3, sticky="w")
+        keys, modes = {}, {}
+        current = DEFAULT_KEYS | self.config.get("keyboard_mapping", {})
+        descriptions = {"I":"Rapport plus facile", "K":"Rapport plus difficile", "A":"Direction gauche", "D":"Direction droite", "U":"Afficher / masquer infos", "C":"Camera", "1":"Interaction 1", "2":"Interaction 2", "3":"Interaction 3"}
+        order = ("GAUCHE","DROITE","HAUT","BAS","MOINS","A","B","Y","Z","PLUS")
+        for row, button in enumerate(order, 2):
+            ttk.Label(frame, text=button).grid(row=row, column=0, sticky="w", pady=4)
+            key = tk.StringVar(value=current.get(button) or "")
+            keys[button] = key
+            ttk.Entry(frame, textvariable=key, width=9).grid(row=row, column=1, padx=8, sticky="ew")
+            mode = tk.StringVar(value=self.config.get("keyboard_modes", {}).get(button, "Simple"))
+            modes[button] = mode
+            ttk.Combobox(frame, textvariable=mode, values=("Simple","Maintenue","Repetition"), state="readonly", width=13).grid(row=row, column=2, padx=8)
+            action = tk.StringVar()
+            def refresh(*args, k=key, v=action):
+                value = k.get().strip().upper()
+                v.set(descriptions.get(value, "Personnalisee" if value else "Desactive"))
+            key.trace_add("write", refresh)
+            refresh()
+            ttk.Label(frame, textvariable=action, width=24).grid(row=row, column=3, sticky="w")
+        ttk.Label(frame, text="A/D et C a valider en roulant. Touche vide = desactive.").grid(row=12, column=0, columnspan=4, sticky="w", pady=10)
+        def defaults():
+            for button in keys:
+                keys[button].set(DEFAULT_KEYS[button])
+                modes[button].set("Simple")
+        def save():
+            mapping = {button: var.get().strip().upper() or None for button, var in keys.items()}
+            try:
+                for key in mapping.values():
+                    key_code(key)
+            except ValueError as exc:
+                messagebox.showerror("Raccourcis", str(exc), parent=win)
+                return
+            if self.save_settings({"keyboard_mapping": mapping, "keyboard_mapping_version": 2, "keyboard_modes": {b:v.get() for b,v in modes.items()}}, win):
+                win.destroy()
+        actions = ttk.Frame(frame)
+        actions.grid(row=13, column=0, columnspan=4, sticky="ew")
+        ttk.Button(actions, text="Valeurs par defaut", command=defaults).pack(side="left")
+        ttk.Button(actions, text="Enregistrer", style="Primary.TButton", command=save).pack(side="right")
+        ttk.Button(actions, text="Annuler", command=win.destroy).pack(side="right", padx=6)
+
+    def open_options(self):
+        win = self.dialog("options", "Options")
+        if win is None:
+            return
+        frame = ttk.Frame(win, padding=20)
+        frame.pack(fill="both", expand=True)
+        mode = tk.StringVar(value=self.config.get("output_mode", "Clavier"))
+        auto_reset = tk.BooleanVar(value=self.config.get("auto_reset", False))
+        fast = tk.BooleanVar(value=self.config.get("fast_reconnect", True))
+        diag = tk.BooleanVar(value=self.config.get("diagnostics", False))
+        auto = tk.BooleanVar(value=autostart_enabled())
+        ttk.Label(frame, text="Mode de sortie", font=("Segoe UI", 12, "bold")).pack(anchor="w")
+        ttk.Combobox(frame, textvariable=mode, state="readonly", values=("Clavier","OpenBikeControl","Bluetooth seulement"), width=30).pack(fill="x", pady=(4,12))
+        for title, var in (("Demarrer avec Windows", auto), ("Reconnexion rapide (cache GATT Windows)", fast), ("Redemarrage de secours (gauche)", auto_reset), ("Logs de diagnostic detailles", diag)):
+            ttk.Checkbutton(frame, text=title, variable=var).pack(anchor="w", pady=4)
+        def save():
+            try:
+                set_autostart(auto.get())
+            except OSError as exc:
+                messagebox.showerror("Options", str(exc), parent=win)
+                return
+            if self.save_settings({"output_mode":mode.get(),"auto_reset":auto_reset.get(),"fast_reconnect":fast.get(),"diagnostics":diag.get()}, win):
+                win.destroy()
+        ttk.Button(frame, text="Enregistrer", style="Primary.TButton", command=save).pack(anchor="e", pady=(14,0))
+
+    def open_diagnostics(self):
+        win = self.dialog("diagnostics", "Diagnostics")
+        if win is None:
+            return
+        win.geometry("680x430")
+        frame = ttk.Frame(win, padding=15)
+        frame.pack(fill="both", expand=True)
+        for side in ("GAUCHE","DROITE"):
+            row = ttk.Frame(frame)
+            row.pack(fill="x")
+            ttk.Label(row, text=side + " : ", font=("Segoe UI", 10, "bold")).pack(side="left")
+            ttk.Label(row, textvariable=self.auth_states[side]).pack(side="left")
+            ttk.Label(row, textvariable=self.button_counts[side]).pack(side="right")
+            ttk.Label(row, text="Pressions :").pack(side="right")
+        actions = ttk.Frame(frame)
+        actions.pack(fill="x", pady=8)
+        ttk.Button(actions, text="Exporter le log", command=self.export_log).pack(side="left")
+        ttk.Button(actions, text="Reset gauche", command=self.request_reset).pack(side="left", padx=6)
+        ttk.Label(actions, textvariable=self.reset_label).pack(side="left")
+        self.logs = tk.Text(frame, wrap="word", font=("Consolas", 9), height=12)
+        scrollbar = ttk.Scrollbar(frame, command=self.logs.yview)
+        self.logs.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        self.logs.pack(fill="both", expand=True)
+        self.logs.insert("end", "\n".join(self.log_history) + "\n")
+        self.logs.see("end")
+        self.logs.configure(state="disabled")
+        def close():
+            self.logs = None
+            win.destroy()
+        win.protocol("WM_DELETE_WINDOW", close)
+
+    def save_settings(self, updates, parent):
+        candidate = dict(self.config)
+        candidate.update(updates)
+        try:
+            core.CONFIG.write_text(json.dumps(candidate, indent=2), encoding="utf-8")
+        except OSError as exc:
+            messagebox.showerror("Configuration", str(exc), parent=parent)
+            return False
+        self.config = candidate
+        self.reconnect()
+        return True
+
+    def reconnect(self):
+        if self.worker and self.worker.is_alive():
+            self.stop()
+            self.restart = True
+        else:
+            self.start()
 
     def export_log(self):
         source = core.CONFIG.with_name("debug.log")
@@ -170,13 +309,6 @@ class App:
                 shutil.copyfile(source, destination)
             except OSError as exc:
                 messagebox.showerror("Diagnostic", str(exc))
-
-    def toggle_auto(self):
-        try:
-            set_autostart(self.auto.get())
-        except OSError as exc:
-            self.auto.set(autostart_enabled())
-            messagebox.showerror("Demarrage automatique", str(exc))
 
     def setup_tray(self):
         import pystray
@@ -205,20 +337,24 @@ class App:
         self.status.set("Recherche Bluetooth...")
         self.connected.clear()
         self.reset_event.clear()
-        self.auth.set("Aucune demande detectee")
+        self.auth.set("Authentification : aucune demande")
+        self.pressed.clear()
+        for label in self.button_labels.values():
+            label.configure(bg="#e8eef4", fg="#153047")
         for side in self.connections:
             self.connections[side].set("En attente")
+            self.connection_labels[side].configure(foreground="#526478")
             self.auth_states[side].set("Auth : aucune demande")
             self.button_counts[side].set(0)
-        mode = self.mode.get()
+        mode = self.config.get("output_mode", "Clavier")
         args = {"Clavier": ["--keyboard"], "OpenBikeControl": ["--obc"],
                 "Bluetooth seulement": ["--no-obc"]}[mode]
         args += ["--dual"]
-        if not self.auto_reset.get():
+        if not self.config.get("auto_reset", False):
             args.append("--no-auto-reset")
-        if self.fast_reconnect.get():
+        if self.config.get("fast_reconnect", True):
             args.append("--fast-reconnect")
-        if self.diagnostics.get():
+        if self.config.get("diagnostics", False):
             args.append("--debug")
         def run():
             async def entry():
@@ -265,25 +401,6 @@ class App:
         elif self.worker and self.worker.is_alive():
             self.root.after(100, self.cancel_pending)
 
-    def apply(self):
-        mapping = {b: v.get().strip().upper() or None for b,v in self.keys.items()}
-        try:
-            for key in mapping.values():
-                key_code(key)
-            self.config.update(keyboard_mapping=mapping, output_mode=self.mode.get(),
-                               auto_reset=self.auto_reset.get(), fast_reconnect=self.fast_reconnect.get(),
-                               diagnostics=self.diagnostics.get(), keyboard_mapping_version=2,
-                               keyboard_modes={b: v.get() for b, v in self.press_modes.items()})
-            core.CONFIG.write_text(json.dumps(self.config, indent=2), encoding="utf-8")
-        except (ValueError, OSError) as exc:
-            messagebox.showerror("Configuration", str(exc))
-            return
-        if self.worker and self.worker.is_alive():
-            self.stop()
-            self.restart = True
-        else:
-            self.start()
-
     def quit(self):
         self.quitting = True
         self.stop()
@@ -313,6 +430,7 @@ class App:
                 self.connected.clear()
                 for side in self.connections:
                     self.connections[side].set("Arretee")
+                    self.connection_labels[side].configure(foreground="#526478")
                 if self.restart and not self.quitting:
                     self.restart = False
                     self.root.after(150, self.start)
@@ -322,15 +440,17 @@ class App:
                     self.reset_label.set(f"Reboots : {self.reset_count}")
                 match = re.search(r"(GAUCHE|DROITE) \| Batterie : (\d+)%", value)
                 if match:
-                    self.levels[match[1]].set(f"Batterie : {match[2]} % (derniere lecture)")
+                    self.levels[match[1]].set(f"{match[2]} %")
+                    self.battery_bars[match[1]]["value"] = int(match[2])
                 button = re.match(r"(GAUCHE|DROITE) \| (\w+) \| (ENFONCE|RELACHE) \|", value)
                 if button and button[2] in self.button_labels:
                     pressed = button[3] == "ENFONCE"
                     label = self.button_labels[button[2]]
-                    label.configure(bg="#16805d" if pressed else self.root.cget("bg"), fg="white" if pressed else "black")
+                    label.configure(bg="#16805d" if pressed else "#e8eef4", fg="white" if pressed else "#153047")
                     if pressed:
                         self.button_counts[button[1]].set(self.button_counts[button[1]].get()+1)
-                        self.last_button.set(f"Dernier bouton : {button[2]} -> {self.keys[button[2]].get()}")
+                        key = self.config.get("keyboard_mapping", {}).get(button[2], DEFAULT_KEYS.get(button[2]))
+                        self.last_button.set(f"Dernier bouton : {button[2]} -> {key or '-'}")
                 timing = re.match(r"(GAUCHE|DROITE) \| RECOVERY \| initialisation en ([0-9.]+)s", value)
                 if timing:
                     self.recovery_times[timing[1]].set(f"Reconnexion : {timing[2]} s")
@@ -342,7 +462,7 @@ class App:
                     side = value.split(" | ")[0]
                     if side in self.auth_states:
                         self.auth_states[side].set("Auth : renouvellement recommande")
-                    self.auth.set("Renouvellement recommande : fermer ce programme, jumeler dans Zwift, puis relancer.")
+                    self.auth.set("Authentification : jumelage Zwift recommande. Arreter le programme avant.")
                     if self.tray:
                         try:
                             self.tray.notify("Jumeler les manettes dans Zwift avant de reprendre.", "Authentification Zwift")
@@ -352,18 +472,23 @@ class App:
                     if value.startswith(f"{side} | Initialisation terminee"):
                         self.connected.add(side)
                         self.connections[side].set("Connectee")
+                        self.connection_labels[side].configure(foreground="#16805d")
                     elif value.startswith(f"{side} | Deconnectee"):
                         self.connected.discard(side)
                         self.connections[side].set("Reconnexion...")
+                        self.connection_labels[side].configure(foreground="#a15c12")
                     elif value.startswith(f"{side} | Connexion..."):
                         self.connections[side].set("Connexion...")
+                        self.connection_labels[side].configure(foreground="#526478")
                 self.status.set(f"{len(self.connected)}/2 manettes connectees")
-                self.logs.configure(state="normal")
-                self.logs.insert("end", value + "\n")
-                if int(self.logs.index("end-1c").split(".")[0]) > 500:
-                    self.logs.delete("1.0", "101.0")
-                self.logs.see("end")
-                self.logs.configure(state="disabled")
+                self.log_history.append(value)
+                if self.logs is not None and self.logs.winfo_exists():
+                    self.logs.configure(state="normal")
+                    self.logs.insert("end", value + "\n")
+                    if int(self.logs.index("end-1c").split(".")[0]) > 500:
+                        self.logs.delete("1.0", "101.0")
+                    self.logs.see("end")
+                    self.logs.configure(state="disabled")
         if not self.quitting:
             self.root.after(100, self.poll)
 
