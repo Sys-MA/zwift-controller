@@ -1,5 +1,5 @@
 import unittest
-from keyboard_output import key_code, DEFAULT_KEYS
+from keyboard_output import key_code, DEFAULT_KEYS, migrate_mapping
 
 class KeyboardTests(unittest.TestCase):
     def test_gears(self):
@@ -14,3 +14,14 @@ class KeyboardTests(unittest.TestCase):
         self.assertIsNone(key_code(None))
         with self.assertRaises(ValueError):
             key_code("INVALID")
+
+    def test_new_defaults(self):
+        self.assertEqual(DEFAULT_KEYS, {"PLUS":"K","MOINS":"I","GAUCHE":"A","DROITE":"D","HAUT":"U","BAS":"C","A":"1","B":"I","Y":"2","Z":"3"})
+
+    def test_migration(self):
+        config = {"keyboard_mapping":{"GAUCHE":"LEFT","B":"Q","Z":None}}
+        migrate_mapping(config)
+        self.assertEqual(config["keyboard_mapping"], {"GAUCHE":"A","B":"Q","Z":None})
+        config["keyboard_mapping"]["GAUCHE"] = "LEFT"
+        migrate_mapping(config)
+        self.assertEqual(config["keyboard_mapping"]["GAUCHE"], "LEFT")
