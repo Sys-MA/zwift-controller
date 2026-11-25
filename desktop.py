@@ -61,7 +61,9 @@ def install_button_styles(root, style):
     images = []
     def background(fill, outline):
         scale = 3
-        image = Image.new("RGBA", (32 * scale, 32 * scale))
+        # ttk/clam can composite transparent image corners over its own grey
+        # background instead of the parent frame. Use the actual surface color.
+        image = Image.new("RGB", (32 * scale, 32 * scale), "#f1f5f9")
         draw = ImageDraw.Draw(image)
         draw.rounded_rectangle((1 * scale, 1 * scale, 31 * scale - 1, 31 * scale - 1),
                                radius=9 * scale, fill=fill, outline=outline, width=scale)
@@ -92,10 +94,11 @@ def install_button_styles(root, style):
         style.layout(name, [(element, {"sticky": "nsew", "children": [
             ("Button.padding", {"sticky": "nsew", "children": [
                 ("Button.label", {"sticky": "nsew"})]})]})])
-        style.configure(name, foreground=text, font=("Segoe UI", 10, "bold"),
+        style.configure(name, background="#f1f5f9", foreground=text, font=("Segoe UI", 10),
                         padding=(12, 9) if name == "Primary.TButton" else (10, 7),
                         anchor="center")
-        style.map(name, foreground=[("disabled", muted), ("!disabled", text)])
+        style.map(name, background=[("disabled", "#f1f5f9"), ("!disabled", "#f1f5f9")],
+                  foreground=[("disabled", muted), ("!disabled", text)])
     # Tk does not keep Python references to images used by style elements.
     root._rounded_button_images = images
 
@@ -140,7 +143,9 @@ class App:
 
         style = ttk.Style(root)
         style.theme_use("clam")
-        style.configure(".", font=("Segoe UI", 10))
+        style.configure(".", font=("Segoe UI", 10), background="#f1f5f9")
+        style.configure("TFrame", background="#f1f5f9")
+        style.configure("TLabel", background="#f1f5f9")
         style.configure("Dashboard.TFrame", background="#f1f5f9")
         style.configure("Card.TFrame", background="#ffffff")
         style.configure("Dashboard.TLabel", background="#f1f5f9", foreground="#172c40")
@@ -273,6 +278,7 @@ class App:
             existing.lift()
             return None
         win = tk.Toplevel(self.root)
+        win.configure(bg="#f1f5f9")
         win.title(title)
         win.transient(self.root)
         self.dialogs[name] = win
