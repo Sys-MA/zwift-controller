@@ -1,4 +1,4 @@
-# Zwift Controller v0.8.3
+# Zwift Controller v0.9.0
 
 Windows desktop bridge for Zwift Click V2 and MyWhoosh. Keyboard mode defaults to I/K for gear changes; U and social actions 1/2/3 were confirmed by the user; A/D and C remain to be validated. OpenBikeControl is experimental.
 
@@ -63,3 +63,9 @@ Small release for end-to-end update validation from 0.8.0. Checks for stable upd
 ## v0.8.2 and v0.8.3
 
 0.8.2 resets inherited PyInstaller runtime environment variables before restarting the onefile executable. 0.8.3 is a version-only validation release; install 0.8.2 first, relaunch it manually if necessary, then update to 0.8.3 to test the corrected updater. No Bluetooth or Fitbit changes.
+
+## v0.9.0 experimental: Zwift account
+
+Options > Compte Zwift opens an optional account dialog. Credentials are sent over HTTPS directly to the Zwift token service; passwords are not stored. Remembered access and refresh tokens are protected with user-scoped Windows DPAPI and stored under %LOCALAPPDATA%/ZwiftController/zwift-session.dat. Sign out removes the local session (not server-side revocation). The non-public Zwift API and signed challenge exchange are based on the MIT-licensed ZwiftBoard project; see THIRD_PARTY_ZWIFTBOARD.txt. No subscription checks are bypassed. If Zwift refuses the account, manual official pairing remains available. No raw FF 03 challenge payload or signed response is logged in dual mode.
+
+In dual mode, an authenticated left-controller challenge is processed on a worker thread and the signed reply is sent over the existing BLE session. Login/logout requests a left-only reconnect without a reset opcode. Right input continues independently. The warning clears upon receiving a button frame after sending the signed reply; that is evidence of communication, not proof of permanent authorization. No-account behavior remains unchanged. Legacy single-connection mode does not use automatic authorization. Fitbit remains deferred. Mock service tests and Windows DPAPI tests are included; actual free-account API compatibility and hardware behavior require validation before promoting this version to main.
