@@ -3,6 +3,7 @@ name: Windows build
 on:
   push:
     branches: [dev, main]
+    tags: ['v*']
   pull_request:
     branches: [main, dev]
   workflow_dispatch:
@@ -49,3 +50,35 @@ jobs:
             dist/ZwiftController.exe.sha256
           if-no-files-found: error
           retention-days: 14
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Validate stable tag and approved branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+          version=$(python3 -c 'from version import VERSION; print(VERSION)')
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$GITHUB_REF_NAME" == "v$version" ]]
+      - uses: actions/download-artifact@v4
+        with:
+          name: ZwiftController-Windows-${{ github.sha }}
+          path: dist
+      - name: Verify and publish approved release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          (cd dist && tr -d '\r' < ZwiftController.exe.sha256 | sha256sum --check -)
+          gh release create "$GITHUB_REF_NAME" dist/ZwiftController.exe dist/ZwiftController.exe.sha256 --verify-tag --generate-notes --title "Zwift Controller $GITHUB_REF_NAME"
