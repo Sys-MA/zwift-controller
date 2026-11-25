@@ -136,8 +136,8 @@ class App:
         from PIL import ImageTk
         self.window_icon = ImageTk.PhotoImage(make_icon(64))
         root.iconphoto(True, self.window_icon)
-        root.geometry("560x480")
-        root.minsize(530, 450)
+        root.geometry("520x370")
+        root.minsize(500, 350)
         root.configure(bg="#f1f5f9")
         root.protocol("WM_DELETE_WINDOW", self.hide)
 
@@ -152,7 +152,11 @@ class App:
         style.configure("Muted.TLabel", background="#f1f5f9", foreground="#526478")
         style.configure("AuthWarning.TLabel", background="#f1f5f9", foreground="#b91c1c", font=("Segoe UI", 10, "bold"))
         style.configure("Card.TLabel", background="#ffffff", foreground="#172c40")
-        style.configure("Battery.TLabel", background="#ffffff", foreground="#172c40", font=("Segoe UI", 28, "bold"))
+        style.configure("Battery.TLabel", background="#ffffff", foreground="#172c40", font=("Segoe UI", 13, "bold"))
+        style.configure("CardMuted.TLabel", background="#ffffff", foreground="#526478", font=("Segoe UI", 9))
+        for name, color in (("Battery", "#16805d"), ("BatteryLow", "#b91c1c"), ("BatteryMedium", "#b7791f"), ("BatteryUnknown", "#94a3b8")):
+            style.configure(name + ".Horizontal.TProgressbar", background=color, troughcolor="#e8eef4",
+                            bordercolor="#e8eef4", lightcolor=color, darkcolor=color, thickness=7, borderwidth=0)
         install_button_styles(root, style)
 
         frame = ttk.Frame(root, padding=20, style="Dashboard.TFrame")
@@ -162,13 +166,13 @@ class App:
         ttk.Label(header, image=self.window_icon, style="Dashboard.TLabel").pack(side="left", padx=(0,12))
         titles = ttk.Frame(header, style="Dashboard.TFrame")
         titles.pack(side="left", fill="x", expand=True)
-        ttk.Label(titles, text="Zwift Controller", style="Dashboard.TLabel", font=("Segoe UI", 20, "bold")).pack(anchor="w")
+        ttk.Label(titles, text="Zwift Controller", style="Dashboard.TLabel", font=("Segoe UI", 17, "bold")).pack(anchor="w")
         self.status = tk.StringVar(value="En attente")
         ttk.Label(titles, textvariable=self.status, style="Muted.TLabel").pack(anchor="w")
         ttk.Label(header, text=VERSION, style="Muted.TLabel").pack(side="right", anchor="n")
 
         batteries = ttk.Frame(frame, style="Dashboard.TFrame")
-        batteries.pack(fill="x", pady=(18, 12))
+        batteries.pack(fill="x", pady=(16, 12))
         self.levels = {}
         self.connections = {}
         self.connection_labels = {}
@@ -179,28 +183,32 @@ class App:
         self.connected = set()
         for i, side in enumerate(("GAUCHE", "DROITE")):
             batteries.columnconfigure(i, weight=1, uniform="cards")
-            panel = ttk.Frame(batteries, padding=14, style="Card.TFrame")
+            panel = ttk.Frame(batteries, padding=12, style="Card.TFrame")
             panel.grid(row=0, column=i, sticky="nsew", padx=(0, 6) if i == 0 else (6, 0))
             ttk.Label(panel, text="Manette " + side.lower(), style="Card.TLabel", font=("Segoe UI", 11, "bold")).pack(anchor="w")
             self.connections[side] = tk.StringVar(value="En attente")
             label = ttk.Label(panel, textvariable=self.connections[side], style="Card.TLabel")
-            label.pack(anchor="w", pady=(3, 5))
+            label.pack(anchor="w", pady=(3, 10))
             self.connection_labels[side] = label
-            self.levels[side] = tk.StringVar(value="-- %")
-            ttk.Label(panel, textvariable=self.levels[side], style="Battery.TLabel").pack(anchor="w")
-            bar = ttk.Progressbar(panel, maximum=100, mode="determinate")
-            bar.pack(fill="x", pady=(0, 8))
+            battery_row = ttk.Frame(panel, style="Card.TFrame")
+            battery_row.pack(fill="x")
+            ttk.Label(battery_row, text="Batterie", style="CardMuted.TLabel").pack(side="left")
+            self.levels[side] = tk.StringVar(value="—")
+            ttk.Label(battery_row, textvariable=self.levels[side], style="Battery.TLabel").pack(side="right")
+            bar = ttk.Progressbar(panel, maximum=100, mode="determinate", style="BatteryUnknown.Horizontal.TProgressbar")
+            bar.pack(fill="x", pady=(4, 6))
             self.battery_bars[side] = bar
             self.recovery_times[side] = tk.StringVar(value="Reconnexion : -")
             self.button_counts[side] = tk.IntVar(value=0)
             self.auth_states[side] = tk.StringVar(value="")
-            ttk.Label(panel, textvariable=self.recovery_times[side], style="Card.TLabel", font=("Segoe UI", 9)).pack(anchor="w")
+            ttk.Label(panel, text="Activité des boutons", style="CardMuted.TLabel").pack(anchor="w", pady=(7, 4))
             chips = ttk.Frame(panel, style="Card.TFrame")
-            chips.pack(fill="x", pady=(9, 0))
+            chips.pack(fill="x")
             buttons = (("HAUT","↑"),("GAUCHE","←"),("DROITE","→"),("BAS","↓"),("MOINS","−")) if i == 0 else (("A","A"),("B","B"),("Y","Y"),("Z","Z"),("PLUS","+"))
             for button, symbol in buttons:
                 chip = tk.Label(chips, text=symbol, width=2, bg="#e8eef4", fg="#153047", font=("Segoe UI", 10, "bold"), padx=2, pady=4)
-                chip.pack(side="left", padx=(0,3))
+                chips.columnconfigure(len(chips.grid_slaves()), weight=1, uniform="chips")
+                chip.grid(row=0, column=len(chips.grid_slaves()), sticky="ew", padx=2)
                 self.button_labels[button] = chip
 
         self.auth = tk.StringVar(value="")
@@ -211,18 +219,21 @@ class App:
         self.configure_button.pack(fill="x", pady=(6,0))
         controls = ttk.Frame(frame, style="Dashboard.TFrame")
         controls.pack(fill="x", pady=(8,0))
-        ttk.Button(controls, text="Reconnecter", command=self.reconnect).pack(side="left")
-        ttk.Button(controls, text="Options", command=self.open_options).pack(side="left", padx=6)
-        ttk.Button(controls, text="Diagnostics", command=self.open_diagnostics).pack(side="right")
+        for index, (label, command) in enumerate((("Reconnecter", self.reconnect), ("Options", self.open_options), ("Diagnostics", self.open_diagnostics))):
+            controls.columnconfigure(index, weight=1, uniform="actions")
+            ttk.Button(controls, text=label, command=command).grid(row=0, column=index, sticky="ew", padx=(0, 5) if index < 2 else (0, 0))
         footer = ttk.Frame(frame, style="Dashboard.TFrame")
-        footer.pack(fill="x", side="bottom", pady=(8,0))
-        ttk.Button(footer, text="Arreter", style="Danger.TButton", command=self.stop).pack(side="left")
+        footer.pack(fill="x", pady=(10,0))
+        ttk.Button(footer, text="Arrêter", style="Danger.TButton", command=self.stop).pack(side="left")
         ttk.Button(footer, text="Quitter", command=self.quit).pack(side="right")
         self.update_button = ttk.Button(frame, text="Mise a jour disponible", style="Update.TButton", command=self.install_update)
         self.reset_label = tk.StringVar(value="Reboots : 0")
         self.setup_tray()
         self.root.after(100, self.poll)
         self.root.after(1500, self.periodic_update_check)
+        # Fit the requested widget height even on higher-DPI displays.
+        root.update_idletasks()
+        root.minsize(max(500, root.winfo_reqwidth()), max(350, root.winfo_reqheight()))
 
     def notify(self, title, message):
         if self.tray:
@@ -230,6 +241,11 @@ class App:
                 self.tray.notify(message, title)
             except Exception:
                 pass
+
+    def clear_battery(self, side):
+        self.levels[side].set("—")
+        self.battery_bars[side].configure(value=0, style="BatteryUnknown.Horizontal.TProgressbar")
+        self.battery_values.pop(side, None)
 
     def refresh_tray(self):
         if self.tray:
@@ -359,7 +375,7 @@ class App:
             if self.save_settings({"output_mode":mode.get(),"auto_reset":auto_reset.get(),"fast_reconnect":fast.get(),"diagnostics":diag.get()}, win):
                 win.destroy()
         ttk.Button(frame, text="Compte Zwift", command=self.open_account).pack(anchor="w", pady=(14,0))
-        ttk.Button(frame, text="Verifier les mises a jour", command=lambda: self.check_update(True)).pack(anchor="w", pady=(8,0))
+        ttk.Button(frame, text="Vérifier les mises à jour", command=lambda: self.check_update(True)).pack(anchor="w", pady=(8,0))
         ttk.Button(frame, text="Enregistrer", style="Primary.TButton", command=save).pack(anchor="e", pady=(14,0))
 
     def account_status_text(self):
@@ -417,7 +433,7 @@ class App:
         actions.pack(fill="x", pady=(14,0))
         signin = ttk.Button(actions, text="Se connecter", style="Primary.TButton", command=login)
         signin.pack(side="left")
-        signout = ttk.Button(actions, text="Deconnecter", style="Danger.TButton", command=logout)
+        signout = ttk.Button(actions, text="Déconnecter", style="Danger.TButton", command=logout)
         signout.pack(side="right")
         self.account_controls = [mail_entry, password_entry, remember_control, signin, signout]
         def close():
@@ -461,13 +477,14 @@ class App:
             row = ttk.Frame(frame)
             row.pack(fill="x")
             ttk.Label(row, text=side + " : ", font=("Segoe UI", 10, "bold")).pack(side="left")
+            ttk.Label(row, textvariable=self.recovery_times[side], foreground="#526478").pack(side="left", padx=(0,8))
             ttk.Label(row, textvariable=self.auth_states[side], foreground="#b91c1c").pack(side="left")
             ttk.Label(row, textvariable=self.button_counts[side]).pack(side="right")
             ttk.Label(row, text="Pressions :").pack(side="right")
         actions = ttk.Frame(frame)
         actions.pack(fill="x", pady=8)
         ttk.Button(actions, text="Exporter le log", command=self.export_log).pack(side="left")
-        ttk.Button(actions, text="Reset gauche", style="Danger.TButton", command=self.request_reset).pack(side="left", padx=6)
+        ttk.Button(actions, text="Redémarrer la gauche", style="Danger.TButton", command=self.request_reset).pack(side="left", padx=6)
         ttk.Label(actions, textvariable=self.reset_label).pack(side="left")
         self.logs = tk.Text(frame, wrap="word", font=("Consolas", 9), height=12)
         scrollbar = ttk.Scrollbar(frame, command=self.logs.yview)
@@ -552,8 +569,7 @@ class App:
         for side in self.connections:
             self.connections[side].set("En attente")
             self.connection_labels[side].configure(foreground="#526478")
-            self.levels[side].set("-- %")
-            self.battery_bars[side]["value"] = 0
+            self.clear_battery(side)
             self.auth_states[side].set("")
             self.button_counts[side].set(0)
         mode = self.config.get("output_mode", "Clavier")
@@ -645,7 +661,8 @@ class App:
                 self.connected.clear()
                 self.refresh_tray()
                 for side in self.connections:
-                    self.connections[side].set("Arretee")
+                    self.clear_battery(side)
+                    self.connections[side].set("Arrêtée")
                     self.connection_labels[side].configure(foreground="#526478")
                 if self.restart and not self.quitting:
                     self.restart = False
@@ -711,7 +728,8 @@ class App:
                     self.levels[match[1]].set(f"{match[2]} %")
                     level = int(match[2])
                     side = match[1]
-                    self.battery_bars[side]["value"] = level
+                    bar_style = "BatteryLow" if level < 15 else "BatteryMedium" if level < 30 else "Battery"
+                    self.battery_bars[side].configure(value=level, style=bar_style + ".Horizontal.TProgressbar")
                     self.battery_values[side] = level
                     self.refresh_tray()
                     if level < 15 and side not in self.low_battery_warned:
@@ -761,21 +779,22 @@ class App:
                     if value.startswith(f"{side} | Initialisation terminee"):
                         self.connected.add(side)
                         self.refresh_tray()
-                        self.connections[side].set("Connectee")
+                        self.connections[side].set("Connectée")
                         self.connection_labels[side].configure(foreground="#16805d")
                     elif value.startswith(f"{side} | Deconnectee"):
                         self.connected.discard(side)
+                        self.clear_battery(side)
                         self.refresh_tray()
                         self.connections[side].set("Reconnexion...")
                         self.connection_labels[side].configure(foreground="#a15c12")
                     elif value.startswith(f"{side} | HEALTH | ") and side in self.connected:
                         health = value.rsplit(" | ",1)[-1]
-                        self.connections[side].set({"ok":"Connectee", "silent":"Connectee, sans donnees", "suspect":"Communication a verifier"}.get(health,"Connectee"))
+                        self.connections[side].set({"ok":"Connectée", "silent":"Connectée, sans données", "suspect":"Communication à vérifier"}.get(health,"Connectée"))
                         self.connection_labels[side].configure(foreground="#16805d" if health == "ok" else "#a15c12")
                     elif value.startswith(f"{side} | Connexion..."):
                         self.connections[side].set("Connexion...")
                         self.connection_labels[side].configure(foreground="#526478")
-                self.status.set(f"{len(self.connected)}/2 manettes connectees")
+                self.status.set(f"{len(self.connected)}/2 manettes connectées")
                 self.log_history.append(value)
                 if self.logs is not None and self.logs.winfo_exists():
                     self.logs.configure(state="normal")
@@ -785,6 +804,11 @@ class App:
                     self.logs.see("end")
                     self.logs.configure(state="disabled")
         if not self.quitting:
+            # Accommodate alerts or the update action without clipping controls.
+            self.root.update_idletasks()
+            needed = max(350, self.root.winfo_reqheight())
+            if self.root.minsize()[1] != needed:
+                self.root.minsize(max(500, self.root.winfo_reqwidth()), needed)
             self.root.after(100, self.poll)
 
 def main():
