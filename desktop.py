@@ -70,6 +70,8 @@ class App:
         self.auth_busy = False
         self.account_status = tk.StringVar(value=self.account_status_text())
         self.account_controls = []
+        self.account_status_label = None
+        self.account_status.trace_add("write", self.refresh_account_status_color)
         self.reset_count = 0
         self.config = core.load_config()
         self.log_history = deque(maxlen=500)
@@ -313,11 +315,19 @@ class App:
     def account_status_text(self):
         if self.zwift_session.ready:
             if self.zwift_session.storage_warning:
-                return "Session active, conservation chiffree indisponible"
-            return "Session active (conservee)" if self.zwift_session.persist else "Session active pour cette execution"
+                return "Compte connecté — session non enregistrée (chiffrement indisponible)"
+            return "Compte Zwift connecté — session sauvegardée" if self.zwift_session.persist else "Compte Zwift connecté — pour cette utilisation seulement"
         if self.zwift_session.storage_warning:
-            return "Session enregistree illisible. Reconnecter le compte."
-        return "Aucun compte connecte"
+            return "Session enregistrée illisible. Reconnectez le compte."
+        return "Aucun compte Zwift connecté"
+
+    def refresh_account_status_color(self, *_):
+        label = self.account_status_label
+        if label is not None and label.winfo_exists():
+            color = ("#526478" if self.auth_busy else
+                     "#a15c12" if self.zwift_session.storage_warning else
+                     "#16805d" if self.zwift_session.ready else "#526478")
+            label.configure(foreground=color)
 
     def open_account(self):
         win = self.dialog("account", "Compte Zwift")
@@ -326,7 +336,10 @@ class App:
         frame = ttk.Frame(win, padding=20)
         frame.pack(fill="both", expand=True)
         ttk.Label(frame, text="Authentification automatique", font=("Segoe UI", 14, "bold")).pack(anchor="w")
-        ttk.Label(frame, textvariable=self.account_status, wraplength=390).pack(anchor="w", pady=(6,10))
+        self.account_status_label = ttk.Label(frame, textvariable=self.account_status, wraplength=390,
+                                              font=("Segoe UI", 11, "bold"))
+        self.account_status_label.pack(anchor="w", pady=(6,10))
+        self.refresh_account_status_color()
         ttk.Label(frame, text="Connexion facultative. Utilise un service Zwift non documente. Le mot de passe est transmis directement au service Zwift et n'est pas conserve.", wraplength=390, justify="left").pack(anchor="w", pady=(0,12))
         email = tk.StringVar()
         password = tk.StringVar()
@@ -360,6 +373,7 @@ class App:
         def close():
             password.set("")
             self.account_controls = []
+            self.account_status_label = None
             win.destroy()
         win.protocol("WM_DELETE_WINDOW", close)
         self.refresh_account_controls()
