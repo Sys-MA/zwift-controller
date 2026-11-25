@@ -49,3 +49,9 @@ Compact dashboard with two battery cards and live button indicators. Configure b
 - The desktop checks GitHub's latest stable release at startup and via Options. Only newer stable semantic versions are offered. The frozen Windows executable can install a release after user confirmation if the release includes a verified SHA-256 digest or a matching checksum asset. Source mode opens the release page instead. The helper waits for shutdown, atomically replaces the executable, keeps a .previous backup and restarts; failures are logged in .update.log. This is not code signing and relies on the integrity of the project's GitHub releases.
 - To publish a stable release after validation, build the approved code, then attach dist/ZwiftController.exe and dist/ZwiftController.exe.sha256 to a non-prerelease GitHub Release tagged vX.Y.Z. No release is created automatically.
 - Fitbit integration is not included. The Windows update flow, mutex and Bluetooth health thresholds require runtime validation.
+
+## GitHub Actions builds
+
+Every push to dev or main runs compilation, unit tests and a Python 3.12 Windows PyInstaller build. Download the ZIP artifact from the Windows build run under the Actions tab (14-day retention). It contains the executable and SHA-256 checksum.
+
+Stable publication remains opt-in: after approving and merging the tested version into main, push the matching version tag (for example, v0.8.0 for VERSION = "0.8.0"). The workflow checks the tag and main ancestry, requires a successful Windows build and tests, verifies the checksum, and publishes a GitHub Release with both assets. Do not push a stable tag until hardware validation is complete. Development builds do not appear as automatic updates.
