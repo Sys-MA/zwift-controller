@@ -1,4 +1,4 @@
-# Zwift Controller v0.8.1
+# Zwift Controller v0.8.3
 
 Windows desktop bridge for Zwift Click V2 and MyWhoosh. Keyboard mode defaults to I/K for gear changes; U and social actions 1/2/3 were confirmed by the user; A/D and C remain to be validated. OpenBikeControl is experimental.
 
@@ -59,3 +59,7 @@ Stable publication remains opt-in: after approving and merging the tested versio
 ## v0.8.1
 
 Small release for end-to-end update validation from 0.8.0. Checks for stable updates at startup and every six hours, notifies once when a newer release is found during the session, and prevents quitting while an update download is in progress. The installer starts the replacement from its own directory and records replacement and restart requests in the update log. The first update from 0.8.0 uses the existing 0.8.0 updater; new updater changes apply to subsequent updates. Bluetooth, keyboard mappings and Fitbit integration are unchanged.
+
+## v0.8.2 and v0.8.3
+
+0.8.2 resets inherited PyInstaller runtime environment variables before restarting the onefile executable. 0.8.3 is a version-only validation release; install 0.8.2 first, relaunch it manually if necessary, then update to 0.8.3 to test the corrected updater. No Bluetooth or Fitbit changes.
