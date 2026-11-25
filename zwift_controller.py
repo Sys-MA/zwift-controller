@@ -24,6 +24,15 @@ RIGHT_MASK = 0x10F0
 
 DEBUG_FILE = None
 
+def rotate_debug():
+    global DEBUG_FILE
+    path = Path(DEBUG_FILE.name)
+    DEBUG_FILE.close()
+    try:
+        path.replace(path.with_suffix(".log.1"))
+    finally:
+        DEBUG_FILE = path.open("a", encoding="utf-8")
+
 def debug(message):
     if DEBUG_FILE is not None:
         log(message)
@@ -33,6 +42,8 @@ def log(message):
     if sys.stdout is not None:
         print(line, flush=True)
     if DEBUG_FILE is not None:
+        if DEBUG_FILE.tell() >= 5 * 1024 * 1024:
+            rotate_debug()
         DEBUG_FILE.write(line + "\n")
         DEBUG_FILE.flush()
 
@@ -62,7 +73,8 @@ def load_config():
     config = DEFAULTS.copy()
     if CONFIG.exists():
         config.update(json.loads(CONFIG.read_text(encoding="utf-8")))
-    return config
+    from keyboard_output import migrate_mapping
+    return migrate_mapping(config)
 
 def disable_quickedit():
     if os.name != "nt":
@@ -285,29 +297,25 @@ async def dual_sessions(config, bridge, read_right=True, auto_reset=True, reset_
                 current = decode_buttons(data)
                 if current is not None and accepting_frames:
                     counts["decoded"] += 1
-                    if recovery_started is not None:
-                        log(f"{side} | RECOVERY | premiere trame apres {time.monotonic()-recovery_started:.2f}s")
-                        recovery_started = None
-                        failures = 0
                     emit(current)
             def sync_notify(sender, data):
                 counts["sync"] += 1
                 debug(f"{side} | RX SYNC #{counts['sync']} | {bytes(data).hex(' ')}")
             try:
-                async with scan_lock:
-                    device = cached_device
-                    cached_device = None
-                    use_cache = fast_reconnect and device is not None and os.name == 'nt'
-                    if device is None:
+                device = cached_device
+                cached_device = None
+                use_cache = fast_reconnect and device is not None and os.name == "nt"
+                if device is None:
+                    async with scan_lock:
                         device = await find_device(address)
-                    if device is not None:
-                        options = {"winrt": {"use_cached_services": True}} if use_cache else {}
-                        client = BleakClient(device, timeout=15, **options)
-                        connect_started = time.monotonic()
-                        log(f"{side} | Connexion... | cache GATT={use_cache}")
-                        await bounded(client.connect(), 8 if recovery_started is not None else 20)
-                        connected_at = time.monotonic()
-                        log(f"{side} | TIMING | GATT connecte en {connected_at-connect_started:.3f}s")
+                if device is not None:
+                    options = {"winrt": {"use_cached_services": True}} if use_cache else {}
+                    client = BleakClient(device, timeout=15, **options)
+                    connect_started = time.monotonic()
+                    log(f"{side} | Connexion... | cache GATT={use_cache}")
+                    await bounded(client.connect(), 8 if recovery_started is not None else 20)
+                    connected_at = time.monotonic()
+                    log(f"{side} | TIMING | GATT connecte en {connected_at-connect_started:.3f}s")
                 if client is None:
                     log(f"{side} | En attente de la manette")
                 else:
@@ -320,16 +328,21 @@ async def dual_sessions(config, bridge, read_right=True, auto_reset=True, reset_
                         raise RuntimeError("Sync RX introuvable")
                     response = "write" in char.properties
                     handshake_started = time.monotonic()
-                    for payload in HANDSHAKE:
+                    for index, payload in enumerate(HANDSHAKE):
                         debug(f"{side} | TX HANDSHAKE | {payload.hex(' ')}")
                         await bounded(client.write_gatt_char(char, payload, response=response))
-                        await asyncio.sleep(0.3)
+                        if index < len(HANDSHAKE) - 1:
+                            await asyncio.sleep(0.3)
                     log(f"{side} | TIMING | handshake en {time.monotonic()-handshake_started:.3f}s")
                     initialized = True
                     ready.add(side)
                     if bridge is not None:
                         bridge.set_ready(True)
                     log(f"{side} | Initialisation terminee - 5 boutons")
+                    if recovery_started is not None:
+                        log(f"{side} | RECOVERY | initialisation en {time.monotonic()-recovery_started:.2f}s")
+                        recovery_started = None
+                        failures = 0
                     if side == "GAUCHE" or read_right:
                         await read_battery(client, side, bridge if side == "GAUCHE" else None)
                     next_battery = time.monotonic() + config["battery_interval"]
@@ -387,6 +400,9 @@ async def dual_sessions(config, bridge, read_right=True, auto_reset=True, reset_
                     cached_device = None
                     log(f"{side} | CACHE | echec, prochaine connexion sans cache")
             finally:
+                accepting_frames = False
+                if initialized and recovery_started is None:
+                    recovery_started = time.monotonic()
                 emit(0)
                 ready.discard(side)
                 if bridge is not None:
@@ -398,7 +414,6 @@ async def dual_sessions(config, bridge, read_right=True, auto_reset=True, reset_
                     log(f"{side} | Deconnectee | {counts}")
             if fast_reconnect and initialized and not reboot and device is not None:
                 cached_device = device
-                recovery_started = time.monotonic()
             await asyncio.sleep((0.10 if fast_reconnect else 0.25) if reboot else 0.25 if cached_device is not None else 1 if recovery_started is not None else 5)
 
     tasks = [
@@ -444,7 +459,7 @@ async def main(argv=None, reset_event=None):
     config = load_config()
     if config["left"].upper() == config["right"].upper() or config["battery_interval"] < 60:
         raise ValueError("Configuration invalide")
-    print("MyWhoosh Controller - v0.7.0")
+    print("MyWhoosh Controller - v0.7.1")
     print("Mode dual : deux connexions." if args.dual else "Connexion principale gauche. CTRL+C pour quitter.")
     if not CONFIG.exists():
         CONFIG.write_text(json.dumps(config, indent=2), encoding="utf-8")
@@ -457,7 +472,7 @@ async def main(argv=None, reset_event=None):
         debug(f"DEBUG | session {datetime.now().isoformat()} | right_battery={not args.no_right_battery}")
         if not args.obc and not args.no_obc:
             from keyboard_output import Keyboard
-            bridge = Keyboard(log, config.get("keyboard_mapping"))
+            bridge = Keyboard(log, config.get("keyboard_mapping"), config.get("keyboard_modes"))
             await bridge.start()
         elif args.obc:
             from openbikecontrol import Bridge
