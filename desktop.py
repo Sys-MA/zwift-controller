@@ -67,13 +67,12 @@ class App:
         self.logs = None
         self.dialogs = {}
         self.button_labels = {}
-        self.pressed = set()
         root.title("Zwift Controller 0.7.2")
         from PIL import ImageTk
         self.window_icon = ImageTk.PhotoImage(make_icon(64))
         root.iconphoto(True, self.window_icon)
-        root.geometry("560x460")
-        root.minsize(510, 430)
+        root.geometry("560x520")
+        root.minsize(530, 510)
         root.configure(bg="#f1f5f9")
         root.protocol("WM_DELETE_WINDOW", self.hide)
 
@@ -338,12 +337,13 @@ class App:
         self.connected.clear()
         self.reset_event.clear()
         self.auth.set("Authentification : aucune demande")
-        self.pressed.clear()
         for label in self.button_labels.values():
             label.configure(bg="#e8eef4", fg="#153047")
         for side in self.connections:
             self.connections[side].set("En attente")
             self.connection_labels[side].configure(foreground="#526478")
+            self.levels[side].set("-- %")
+            self.battery_bars[side]["value"] = 0
             self.auth_states[side].set("Auth : aucune demande")
             self.button_counts[side].set(0)
         mode = self.config.get("output_mode", "Clavier")
