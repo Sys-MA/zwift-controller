@@ -1,4 +1,4 @@
-# Zwift Controller v0.8.0
+# Zwift Controller v0.8.1
 
 Windows desktop bridge for Zwift Click V2 and MyWhoosh. Keyboard mode defaults to I/K for gear changes; U and social actions 1/2/3 were confirmed by the user; A/D and C remain to be validated. OpenBikeControl is experimental.
 
@@ -55,3 +55,7 @@ Compact dashboard with two battery cards and live button indicators. Configure b
 Every push to dev or main runs compilation, unit tests and a Python 3.12 Windows PyInstaller build. Download the ZIP artifact from the Windows build run under the Actions tab (14-day retention). It contains the executable and SHA-256 checksum.
 
 Stable publication remains opt-in: after approving and merging the tested version into main, push the matching version tag (for example, v0.8.0 for VERSION = "0.8.0"). The workflow checks the tag and main ancestry, requires a successful Windows build and tests, verifies the checksum, and publishes a GitHub Release with both assets. Do not push a stable tag until hardware validation is complete. Development builds do not appear as automatic updates.
+
+## v0.8.1
+
+Small release for end-to-end update validation from 0.8.0. Checks for stable updates at startup and every six hours, notifies once when a newer release is found during the session, and prevents quitting while an update download is in progress. The installer starts the replacement from its own directory and records replacement and restart requests in the update log. The first update from 0.8.0 uses the existing 0.8.0 updater; new updater changes apply to subsequent updates. Bluetooth, keyboard mappings and Fitbit integration are unchanged.
