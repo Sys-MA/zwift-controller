@@ -263,6 +263,7 @@ class App:
         self.low_battery_warned = set()
         self.logs = None
         self.dialogs = {}
+        self.heart_rate = None
         self.button_labels = {}
         root.title("Zwift Controller " + VERSION)
         from PIL import ImageTk
@@ -515,9 +516,20 @@ class App:
                 return
             if self.save_settings({"output_mode":mode.get(),"auto_reset":auto_reset.get(),"fast_reconnect":fast.get(),"diagnostics":diag.get(),"auto_mywhoosh":auto_game.get(),"close_quits":close_quits.get()}, win):
                 win.destroy()
-        ttk.Button(frame, text="Compte Zwift", command=self.open_account).pack(anchor="w", pady=(14,0))
+        ttk.Button(frame, text="Affichage cardio (optionnel)", command=self.open_heart_rate).pack(anchor="w", pady=(14,0))
+        ttk.Button(frame, text="Compte Zwift", command=self.open_account).pack(anchor="w", pady=(8,0))
         ttk.Button(frame, text="Vérifier les mises à jour", command=lambda: self.check_update(True)).pack(anchor="w", pady=(8,0))
         ttk.Button(frame, text="Enregistrer", style="Primary.TButton", command=save).pack(anchor="e", pady=(14,0))
+
+    def open_heart_rate(self):
+        from heart_rate import HeartRateWindow
+        if self.heart_rate is not None and not self.heart_rate.closed:
+            self.heart_rate.window.lift()
+            return
+        if self.heart_rate is not None and self.heart_rate.worker is not None and self.heart_rate.worker.is_alive():
+            messagebox.showinfo("Cardio", "La connexion précédente est en cours de fermeture.")
+            return
+        self.heart_rate = HeartRateWindow(self.root)
 
     def account_status_text(self):
         if self.zwift_session.ready:
@@ -851,6 +863,8 @@ class App:
             messagebox.showinfo("Mise a jour", "Le telechargement est en cours. Attendre la fin avant de quitter.")
             return
         self.quitting = True
+        if self.heart_rate is not None and not self.heart_rate.closed:
+            self.heart_rate.close()
         self.stop_worker()
         self.root.after(100, self.finish_quit)
 
