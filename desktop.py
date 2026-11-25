@@ -78,8 +78,8 @@ class App:
         from PIL import ImageTk
         self.window_icon = ImageTk.PhotoImage(make_icon(64))
         root.iconphoto(True, self.window_icon)
-        root.geometry("560x520")
-        root.minsize(530, 510)
+        root.geometry("560x480")
+        root.minsize(530, 450)
         root.configure(bg="#f1f5f9")
         root.protocol("WM_DELETE_WINDOW", self.hide)
 
@@ -146,14 +146,11 @@ class App:
                 self.button_labels[button] = chip
 
         self.auth = tk.StringVar(value="")
-        self.game_status = tk.StringVar(value="MyWhoosh : premier plan non verifie")
-        self.last_button = tk.StringVar(value="Dernier bouton : -")
+        self.keyboard_warning = tk.StringVar(value="")
         self.auth_warning = ttk.Label(frame, textvariable=self.auth, style="AuthWarning.TLabel", wraplength=460)
-        self.game_label = ttk.Label(frame, textvariable=self.game_status, style="Muted.TLabel", wraplength=460)
-        self.game_label.pack(anchor="w", pady=(3, 0))
-        ttk.Label(frame, textvariable=self.last_button, style="Dashboard.TLabel").pack(anchor="w", pady=(3, 12))
-
-        ttk.Button(frame, text="Configurer les boutons", style="Primary.TButton", command=self.open_buttons).pack(fill="x")
+        self.keyboard_warning_label = ttk.Label(frame, textvariable=self.keyboard_warning, style="AuthWarning.TLabel", wraplength=460)
+        self.configure_button = ttk.Button(frame, text="Configurer les boutons", style="Primary.TButton", command=self.open_buttons)
+        self.configure_button.pack(fill="x", pady=(6,0))
         controls = ttk.Frame(frame, style="Dashboard.TFrame")
         controls.pack(fill="x", pady=(8,0))
         ttk.Button(controls, text="Reconnecter", command=self.reconnect).pack(side="left")
@@ -393,6 +390,8 @@ class App:
         self.reset_event.clear()
         self.auth.set("")
         self.auth_warning.pack_forget()
+        self.keyboard_warning.set("")
+        self.keyboard_warning_label.pack_forget()
         for label in self.button_labels.values():
             label.configure(bg="#e8eef4", fg="#153047")
         for side in self.connections:
@@ -498,7 +497,7 @@ class App:
                 if release:
                     self.update_button.configure(text=f"Mise a jour disponible : {release['version']}", state="normal")
                     if not self.update_button.winfo_manager():
-                        self.update_button.pack(fill="x", pady=(8,0), before=self.game_label)
+                        self.update_button.pack(fill="x", pady=(8,0), before=self.configure_button)
                 else:
                     self.update_button.pack_forget()
                     if manual:
@@ -547,22 +546,20 @@ class App:
                     label.configure(bg="#16805d" if pressed else "#e8eef4", fg="white" if pressed else "#153047")
                     if pressed:
                         self.button_counts[button[1]].set(self.button_counts[button[1]].get()+1)
-                        key = self.config.get("keyboard_mapping", {}).get(button[2], DEFAULT_KEYS.get(button[2]))
-                        self.last_button.set(f"Dernier bouton : {button[2]} -> {key or '-'}")
                 timing = re.match(r"(GAUCHE|DROITE) \| RECOVERY \| initialisation en ([0-9.]+)s", value)
                 if timing:
                     self.recovery_times[timing[1]].set(f"Reconnexion : {timing[2]} s")
-                if value.startswith("CLAVIER | FOCUS |"):
-                    self.game_status.set(value.split(" | ")[-1])
                 if value.startswith("CLAVIER | SendInput incomplet"):
-                    self.game_status.set("Injection clavier impossible : verifier les droits administrateur")
+                    self.keyboard_warning.set("Injection clavier impossible : verifier les droits administrateur")
+                    if not self.keyboard_warning_label.winfo_manager():
+                        self.keyboard_warning_label.pack(before=self.configure_button, anchor="w", fill="x", pady=(0,5))
                 if " | AUTH | " in value:
                     side = value.split(" | ")[0]
                     if side in self.auth_states:
                         self.auth_states[side].set("Authentification Zwift requise")
                     self.auth.set("Authentification Zwift requise. Arreter le programme, puis jumeler dans Zwift.")
                     if not self.auth_warning.winfo_manager():
-                        self.auth_warning.pack(before=self.game_label, anchor="w", fill="x", pady=(0, 5))
+                        self.auth_warning.pack(before=self.configure_button, anchor="w", fill="x", pady=(0, 5))
                     if self.tray:
                         try:
                             self.tray.notify("Jumeler les manettes dans Zwift avant de reprendre.", "Authentification Zwift")
