@@ -7,6 +7,8 @@ from pathlib import Path
 import time
 from datetime import datetime
 from bleak import BleakScanner, BleakClient
+from instance_lock import single_instance, InstanceUnavailable
+from version import VERSION
 
 ZWIFT_ASYNC = "00000002-19ca-4651-86e5-fa29dcdd09d1"
 ZWIFT_SYNC_RX = "00000003-19ca-4651-86e5-fa29dcdd09d1"
@@ -274,6 +276,10 @@ async def dual_sessions(config, bridge, read_right=True, auto_reset=True, reset_
             use_cache = False
             device = None
             initialized = False
+            cache_failed = False
+            last_rx = time.monotonic()
+            last_frame = last_rx
+            health = None
             challenges = 0
             state = 0
             counts = {"rx": 0, "decoded": 0, "sync": 0}
@@ -286,7 +292,10 @@ async def dual_sessions(config, bridge, read_right=True, auto_reset=True, reset_
                         bridge.button(button, pressed)
                 state = current
             def notify(sender, data):
-                nonlocal challenges, recovery_started, failures
+                nonlocal challenges, last_rx, last_frame
+                if not accepting_frames:
+                    return
+                last_rx = time.monotonic()
                 counts["rx"] += 1
                 debug(f"{side} | RX ASYNC #{counts['rx']} | {bytes(data).hex(' ')}")
                 if bytes(data[:2]) == b"\xff\x03":
@@ -297,8 +306,13 @@ async def dual_sessions(config, bridge, read_right=True, auto_reset=True, reset_
                 current = decode_buttons(data)
                 if current is not None and accepting_frames:
                     counts["decoded"] += 1
+                    last_frame = time.monotonic()
                     emit(current)
             def sync_notify(sender, data):
+                nonlocal last_rx
+                if not accepting_frames:
+                    return
+                last_rx = time.monotonic()
                 counts["sync"] += 1
                 debug(f"{side} | RX SYNC #{counts['sync']} | {bytes(data).hex(' ')}")
             try:
@@ -355,6 +369,12 @@ async def dual_sessions(config, bridge, read_right=True, auto_reset=True, reset_
                         if not client.is_connected:
                             break
                         now = time.monotonic()
+                        # A lack of button frames alone is not proof of failure.
+                        new_health = ("silent" if now-last_rx >= 20 else
+                                      "suspect" if challenges >= 2 and now-last_frame >= 60 else "ok")
+                        if new_health != health:
+                            health = new_health
+                            log(f"{side} | HEALTH | {health}")
                         if side == "GAUCHE" and refresh_handshake and now >= next_refresh:
                             log(f"{side} | REFRESH | debut sans deconnexion | decoded={counts['decoded']} | challenges={challenges}")
                             refresh_started = time.monotonic()
@@ -397,6 +417,7 @@ async def dual_sessions(config, bridge, read_right=True, auto_reset=True, reset_
             except Exception as exc:
                 log(f"{side} | {type(exc).__name__}: {exc!r}")
                 if use_cache:
+                    cache_failed = True
                     cached_device = None
                     log(f"{side} | CACHE | echec, prochaine connexion sans cache")
             finally:
@@ -412,9 +433,9 @@ async def dual_sessions(config, bridge, read_right=True, auto_reset=True, reset_
                     await disconnect(client)
                     log(f"{side} | TIMING | deconnexion en {time.monotonic()-disconnect_started:.3f}s")
                     log(f"{side} | Deconnectee | {counts}")
-            if fast_reconnect and initialized and not reboot and device is not None:
+            if fast_reconnect and initialized and not reboot and not cache_failed and device is not None:
                 cached_device = device
-            await asyncio.sleep((0.10 if fast_reconnect else 0.25) if reboot else 0.25 if cached_device is not None else 1 if recovery_started is not None else 5)
+            await asyncio.sleep((0.10 if fast_reconnect else 0.25) if reboot else 0.15 if cached_device is not None else 0.5 if recovery_started is not None else 5)
 
     tasks = [
         asyncio.create_task(worker("GAUCHE", config["left"], LEFT_MASK)),
@@ -459,8 +480,8 @@ async def main(argv=None, reset_event=None):
     config = load_config()
     if config["left"].upper() == config["right"].upper() or config["battery_interval"] < 60:
         raise ValueError("Configuration invalide")
-    print("MyWhoosh Controller - v0.7.2")
-    print("Mode dual : deux connexions." if args.dual else "Connexion principale gauche. CTRL+C pour quitter.")
+    log(f"MyWhoosh Controller - v{VERSION}")
+    log("Mode dual : deux connexions." if args.dual else "Connexion principale gauche. CTRL+C pour quitter.")
     if not CONFIG.exists():
         CONFIG.write_text(json.dumps(config, indent=2), encoding="utf-8")
     global DEBUG_FILE
@@ -503,7 +524,11 @@ async def main(argv=None, reset_event=None):
 if __name__ == "__main__":
     restore_console = disable_quickedit()
     try:
-        asyncio.run(main())
+        with single_instance():
+            asyncio.run(main())
+    except InstanceUnavailable as exc:
+        print(exc, file=sys.stderr)
+        sys.exit(2)
     except KeyboardInterrupt:
         print("\nProgramme arrete.")
     finally:
