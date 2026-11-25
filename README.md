@@ -1,4 +1,4 @@
-# Zwift Controller v0.7.2
+# Zwift Controller v0.8.0
 
 Windows desktop bridge for Zwift Click V2 and MyWhoosh. Keyboard mode defaults to I/K for gear changes; U and social actions 1/2/3 were confirmed by the user; A/D and C remain to be validated. OpenBikeControl is experimental.
 
@@ -39,3 +39,13 @@ New defaults: minus=I, plus=K, left=A, right=D, up=U, down=C, A=1, B=I, Y=2, Z=3
 ## v0.7.2
 
 Compact dashboard with two battery cards and live button indicators. Configure buttons in a separate editor with default/reset, cancel and save. Advanced settings live in Options; the Diagnostics window displays the last 500 log messages and provides export and left reset. Detailed raw logging remains optional. The Bluetooth algorithm and key defaults are unchanged. Windows layout and interaction require validation.
+
+## v0.8.0
+
+- The desktop and console entry points share the same named Windows mutex. Close an older bridge before starting the new version. A second instance cannot access the controllers.
+- Independent connections report an advisory warning after 20 seconds without any notifications, or after repeated authentication challenges and 60 seconds without button frames. Idle button periods alone are not treated as failures. These warnings do not cause automatic resets.
+- Failed cached GATT sessions fall back to uncached discovery; retry intervals are slightly shorter. Hardware timing remains to be validated.
+- The tray tooltip displays the latest battery reading per connected controller; the desktop warns once per low-battery period below 15%.
+- The desktop checks GitHub's latest stable release at startup and via Options. Only newer stable semantic versions are offered. The frozen Windows executable can install a release after user confirmation if the release includes a verified SHA-256 digest or a matching checksum asset. Source mode opens the release page instead. The helper waits for shutdown, atomically replaces the executable, keeps a .previous backup and restarts; failures are logged in .update.log. This is not code signing and relies on the integrity of the project's GitHub releases.
+- To publish a stable release after validation, build the approved code, then attach dist/ZwiftController.exe and dist/ZwiftController.exe.sha256 to a non-prerelease GitHub Release tagged vX.Y.Z. No release is created automatically.
+- Fitbit integration is not included. The Windows update flow, mutex and Bluetooth health thresholds require runtime validation.
