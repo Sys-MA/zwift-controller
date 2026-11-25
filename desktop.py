@@ -16,6 +16,7 @@ import webbrowser
 from instance_lock import single_instance, InstanceUnavailable
 from version import VERSION
 import updater
+from zwift_auth import Session, AuthError
 from bike_icon import make_icon
 
 import zwift_controller as core
@@ -64,6 +65,11 @@ class App:
         self.quitting = False
         self.restart = False
         self.reset_event = threading.Event()
+        self.auth_reconnect = threading.Event()
+        self.zwift_session = Session()
+        self.auth_busy = False
+        self.account_status = tk.StringVar(value=self.account_status_text())
+        self.account_controls = []
         self.reset_count = 0
         self.config = core.load_config()
         self.log_history = deque(maxlen=500)
@@ -300,8 +306,85 @@ class App:
                 return
             if self.save_settings({"output_mode":mode.get(),"auto_reset":auto_reset.get(),"fast_reconnect":fast.get(),"diagnostics":diag.get()}, win):
                 win.destroy()
-        ttk.Button(frame, text="Verifier les mises a jour", command=lambda: self.check_update(True)).pack(anchor="w", pady=(14,0))
+        ttk.Button(frame, text="Compte Zwift", command=self.open_account).pack(anchor="w", pady=(14,0))
+        ttk.Button(frame, text="Verifier les mises a jour", command=lambda: self.check_update(True)).pack(anchor="w", pady=(8,0))
         ttk.Button(frame, text="Enregistrer", style="Primary.TButton", command=save).pack(anchor="e", pady=(14,0))
+
+    def account_status_text(self):
+        if self.zwift_session.ready:
+            if self.zwift_session.storage_warning:
+                return "Session active, conservation chiffree indisponible"
+            return "Session active (conservee)" if self.zwift_session.persist else "Session active pour cette execution"
+        if self.zwift_session.storage_warning:
+            return "Session enregistree illisible. Reconnecter le compte."
+        return "Aucun compte connecte"
+
+    def open_account(self):
+        win = self.dialog("account", "Compte Zwift")
+        if win is None:
+            return
+        frame = ttk.Frame(win, padding=20)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text="Authentification automatique", font=("Segoe UI", 14, "bold")).pack(anchor="w")
+        ttk.Label(frame, textvariable=self.account_status, wraplength=390).pack(anchor="w", pady=(6,10))
+        ttk.Label(frame, text="Connexion facultative. Utilise un service Zwift non documente. Le mot de passe est transmis directement au service Zwift et n'est pas conserve.", wraplength=390, justify="left").pack(anchor="w", pady=(0,12))
+        email = tk.StringVar()
+        password = tk.StringVar()
+        remember = tk.BooleanVar(value=True)
+        ttk.Label(frame, text="Courriel").pack(anchor="w")
+        mail_entry = ttk.Entry(frame, textvariable=email, width=43)
+        mail_entry.pack(fill="x", pady=(3,8))
+        ttk.Label(frame, text="Mot de passe").pack(anchor="w")
+        password_entry = ttk.Entry(frame, textvariable=password, show="*")
+        password_entry.pack(fill="x", pady=(3,8))
+        remember_control = ttk.Checkbutton(frame, text="Conserver la session chiffree dans Windows", variable=remember)
+        remember_control.pack(anchor="w")
+        def login():
+            username, secret = email.get().strip(), password.get()
+            if not username or not secret:
+                messagebox.showinfo("Compte Zwift", "Entrer le courriel et le mot de passe.", parent=win)
+                return
+            password.set("")
+            persist = remember.get()
+            self.account_action("login", lambda: self.zwift_session.login(username, secret, persist))
+        def logout():
+            if messagebox.askyesno("Compte Zwift", "Supprimer la session locale?", parent=win):
+                self.account_action("logout", self.zwift_session.logout)
+        actions = ttk.Frame(frame)
+        actions.pack(fill="x", pady=(14,0))
+        signin = ttk.Button(actions, text="Se connecter", style="Primary.TButton", command=login)
+        signin.pack(side="left")
+        signout = ttk.Button(actions, text="Deconnecter", command=logout)
+        signout.pack(side="right")
+        self.account_controls = [mail_entry, password_entry, remember_control, signin, signout]
+        def close():
+            password.set("")
+            self.account_controls = []
+            win.destroy()
+        win.protocol("WM_DELETE_WINDOW", close)
+        self.refresh_account_controls()
+
+    def refresh_account_controls(self):
+        for widget in self.account_controls:
+            if widget.winfo_exists():
+                widget.configure(state="disabled" if self.auth_busy else "normal")
+
+    def account_action(self, action, operation):
+        if self.auth_busy:
+            return
+        self.auth_busy = True
+        self.account_status.set("Communication avec Zwift..." if action == "login" else "Suppression de la session...")
+        self.refresh_account_controls()
+        def run():
+            try:
+                operation()
+            except AuthError as exc:
+                self.events.put(("account_result", (action, str(exc))))
+            except Exception:
+                self.events.put(("account_result", (action, "Operation impossible. Verifier la session Windows.")))
+            else:
+                self.events.put(("account_result", (action, None)))
+        threading.Thread(target=run, daemon=True).start()
 
     def open_diagnostics(self):
         win = self.dialog("diagnostics", "Diagnostics")
@@ -395,6 +478,7 @@ class App:
         self.battery_values.clear()
         self.refresh_tray()
         self.reset_event.clear()
+        self.auth_reconnect.clear()
         self.auth.set("")
         self.auth_warning.pack_forget()
         self.keyboard_warning.set("")
@@ -423,7 +507,7 @@ class App:
                 self.loop = asyncio.get_running_loop()
                 self.task = asyncio.current_task()
                 try:
-                    await core.main(args, reset_event=self.reset_event)
+                    await core.main(args, reset_event=self.reset_event, auth_client=self.zwift_session, auth_reconnect=self.auth_reconnect)
                 except asyncio.CancelledError:
                     pass
                 except Exception as exc:
@@ -502,6 +586,20 @@ class App:
                 if self.restart and not self.quitting:
                     self.restart = False
                     self.root.after(150, self.start)
+            elif event == "account_result":
+                action, error = value
+                self.auth_busy = False
+                self.account_status.set(self.account_status_text())
+                self.refresh_account_controls()
+                if error:
+                    messagebox.showerror("Compte Zwift", error)
+                else:
+                    if self.worker and self.worker.is_alive():
+                        self.auth_reconnect.set()
+                    if action == "login":
+                        self.log_history.append("AUTH | Session Zwift ouverte; reconnexion gauche demandee")
+                    else:
+                        self.log_history.append("AUTH | Session locale supprimee")
             elif event == "update_checked":
                 release, manual = value
                 self.update_busy = False
@@ -571,18 +669,30 @@ class App:
                     self.keyboard_warning.set("Injection clavier impossible : verifier les droits administrateur")
                     if not self.keyboard_warning_label.winfo_manager():
                         self.keyboard_warning_label.pack(before=self.configure_button, anchor="w", fill="x", pady=(0,5))
-                if " | AUTH | " in value:
+                if " | AUTH_OK | " in value:
                     side = value.split(" | ")[0]
                     if side in self.auth_states:
-                        self.auth_states[side].set("Authentification Zwift requise")
-                    self.auth.set("Authentification Zwift requise. Arreter le programme, puis jumeler dans Zwift.")
-                    if not self.auth_warning.winfo_manager():
-                        self.auth_warning.pack(before=self.configure_button, anchor="w", fill="x", pady=(0, 5))
-                    if self.tray:
-                        try:
-                            self.tray.notify("Jumeler les manettes dans Zwift avant de reprendre.", "Authentification Zwift")
-                        except Exception:
-                            pass
+                        self.auth_states[side].set("")
+                    if not any(var.get() for var in self.auth_states.values()):
+                        self.auth.set("")
+                        self.auth_warning.pack_forget()
+                    if not self.auth_busy:
+                        self.account_status.set(self.account_status_text())
+                elif " | AUTH | " in value:
+                    side = value.split(" | ")[0]
+                    if side in self.auth_states:
+                        first = not self.auth_states[side].get()
+                        self.auth_states[side].set("Authentification a verifier")
+                        message = ("Authentification Zwift : reponse non confirmee. Consulter les diagnostics."
+                                   if self.zwift_session.ready else
+                                   "Authentification Zwift requise. Options > Compte Zwift ou jumelage dans Zwift.")
+                        self.auth.set(message)
+                        if not self.auth_warning.winfo_manager():
+                            self.auth_warning.pack(before=self.configure_button, anchor="w", fill="x", pady=(0,5))
+                        if first:
+                            self.notify("Authentification Zwift", message)
+                    if not self.auth_busy:
+                        self.account_status.set(self.account_status_text())
                 for side in self.connections:
                     if value.startswith(f"{side} | Initialisation terminee"):
                         self.connected.add(side)
